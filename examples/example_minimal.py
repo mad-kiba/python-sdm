@@ -10,7 +10,7 @@ import sdm
 
 
 IN_ID = 1 # добавить сюда автоинкремент
-IN_CSV = 'data/726.csv'
+IN_CSV = 'data/example.csv'
 IN_MODEL = 'XGBoost'
 IN_MIN_LAT = 78.0
 IN_MIN_LON = 50.0
