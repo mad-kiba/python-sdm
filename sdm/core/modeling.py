@@ -34,7 +34,7 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     
     OUTPUT_FUTURE_DIR = os.path.join(OUTPUT_PREDICTIONS_DIR, str(IN_ID))
     
-    RAW_RASTER_DIR = "input_predictors_scaled"
+    RAW_RASTER_DIR = "input_predictors"
     
     SCALES_FILE = os.path.join(RAW_RASTER_DIR, 'predictors_scales.json')
     
