@@ -26,14 +26,6 @@ BG_DISTANCE_MAX = 50
 
 #PREDICTORS = request.form.get('predictors')
 PREDICTORS = 'all'
-OUTPUT_SUITABILITY_JPG = "output/suitability_"+str(IN_ID)+".jpg"
-OUTPUT_SUITABILITY_TIF = "output/suitability_"+str(IN_ID)+".tif"
-OUTPUT_HISTOGRAMS_DIR = "output/gistos"
-OUTPUT_HISTOGRAMS_ZIP = os.path.join(OUTPUT_HISTOGRAMS_DIR, str(IN_ID), "histos.zip")
-
-OUTPUT_PREDICTIONS_DIR = "output/predictions"
-OUTPUT_FUTURE_DIR = os.path.join(OUTPUT_PREDICTIONS_DIR, str(IN_ID))
-OUTPUT_FUTURE_ZIP = os.path.join(OUTPUT_FUTURE_DIR, "futures.zip")
 
 MODEL_FUTURE = 0 # прогнозируем будущее
 
