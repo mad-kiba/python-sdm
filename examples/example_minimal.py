@@ -9,14 +9,14 @@ sys.path.insert(0, project_root)
 import sdm 
 
 
-IN_ID = 1 # добавить сюда автоинкремент
+IN_ID = 1 # TODO: автоинкремент
 IN_CSV = 'data/example.csv'
 IN_MODEL = 'XGBoost'
 IN_MIN_LAT = 78.0
 IN_MIN_LON = 50.0
 IN_MAX_LAT = 90.0
 IN_MAX_LON = 56.0
-IN_RESOLUTION = '30s' # request.form.get('resolution', type=float)
+IN_RESOLUTION = '30s' 
 
 # параметры для генерации фоновых точек
 BG_MULT = 20
@@ -24,7 +24,6 @@ BG_PC = 50
 BG_DISTANCE_MIN = 20
 BG_DISTANCE_MAX = 50
 
-#PREDICTORS = request.form.get('predictors')
 PREDICTORS = 'all'
 
 MODEL_FUTURE = 0 # прогнозируем будущее
