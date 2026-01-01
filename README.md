@@ -1,7 +1,7 @@
 # python-sdm
-Species Distribution Modelling (SDM) library for Python V5.5.
+Species Distribution Modelling (SDM) library for Python.
 
-Библиотека для моделирования распространения видов (SDM) для Python, версия 5.5.
+Библиотека для моделирования распространения видов (SDM) для Python.
 
 Суть SDM - поиск закономерностей между местами наблюдения вида и условиями окружающей среды в этих местах.
 Примеры источников наблюдательных данных: GBIF, iNaturalist, eBird, birds.kz, wingeds.world, plantarium.su и др.

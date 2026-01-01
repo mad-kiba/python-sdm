@@ -21,7 +21,7 @@ from .utils.plot_utils import draw_map, create_beautiful_histogram
 
 
 def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MAX_LON, IN_RESOLUTION, MODEL_FUTURE, IN_MODEL,
-            BG_MULT, BG_DISTANCE_MIN, BG_DISTANCE_MAX, BG_PC):
+            BG_MULT, BG_DISTANCE_MIN, BG_DISTANCE_MAX, BG_PC, jobs):
     print("-- Регион для моделирования: ")
     print("("+str(IN_MIN_LAT)+","+str(IN_MIN_LON)+"), ("+str(IN_MAX_LAT)+","+str(IN_MAX_LON)+")")
     
@@ -54,9 +54,11 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     csv_filename = 'output/texts/'+str(IN_ID)+'.csv'
     
     # 1) Подготовка предикторов к нужным координатам
+    print("\n-- 1. Подготовка предикторов ")
     clip_rasters(RAW_RASTER_DIR, OUTPUT_RASTER_DIR, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MAX_LON, MODEL_FUTURE)
     
     # 2) Загрузка стека предикторов
+    print("\n-- 2. Загрузка предикторов ")
     stack, valid_mask, transform, crs, profile, band_names = load_raster_stack(RASTER_DIR, PREDICTORS)
     bands, H, W = stack.shape
     
@@ -68,11 +70,12 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
         f.write(f"\n{band_names}")
     
     # 3) Загрузка присутствий
-    with open(IN_CSV, 'r') as file: # читаем исходный файл
-        IN_CSV = file.read()
+    print("\n-- 3. Загрузка наблюдений")
+    if (os.path.isfile(IN_CSV)): # если это путь к файлу, читаем файл, иначе считаем дампом csv
+        with open(IN_CSV, 'r') as file: # читаем исходный файл
+            IN_CSV = file.read()
     with open(csv_filename, 'a') as f: # записываем в архив
         f.write(IN_CSV)
-    
     df = pd.read_csv(csv_filename, sep="\t", index_col=False, on_bad_lines='skip', low_memory=False)
     
     LAT_COL = 'lat'
@@ -97,6 +100,7 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
         return {"error": "csv parse error", "status": "terminated"}, 401
     
     # 3.1) Фильтрация мусорных данных из GBIF
+    print("-- 3.1. Фильтрация мусорных данных из GBIF")
     if 'coordinateUncertaintyInMeters' in df.columns:
         df['coordinateUncertaintyInMeters'] = df['coordinateUncertaintyInMeters'].fillna(0).astype(int)
         df = df[df['coordinateUncertaintyInMeters']<1000]
@@ -107,6 +111,7 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     #print(df[LON_COL])
     
     # 3.2) группировка по месяцам
+    print("-- 3.2. Группировка по месяцам")
     # здесь где-то перепутаны координаты!!!
     df_coord_filtered = df[df['year']>2010]
     df_coord_filtered = df_coord_filtered[df_coord_filtered[LAT_COL].astype(float)>IN_MIN_LON]
@@ -129,6 +134,7 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
             json.dump(counts_dict, f, ensure_ascii=False, indent=4) # indent=4 для читаемости
     
     # 3.3) финальные присустсвия
+    print("-- 3.3. Финальные присутствия")
     occ = load_occurrences(df, LON_COL, LAT_COL)
     print("\n-- Обработка наблюдений")
     print(f"Всего записей в CSV: {len(occ)}")
@@ -146,6 +152,7 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     
     
     # 4) Привязка присутствий к пикселям растра и фильтрация по маске валидности
+    print("\n-- 4. Привязка присутствий к пикселям растра и фильтрация по маске валидности")
     rows, cols, inside = points_to_pixel_indices(occ[LON_COL].values, occ[LAT_COL].values,
                                                  transform, W, H)
     # Фильтруем те, что внутри растра
@@ -166,6 +173,7 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     
     
     # 4.1) создаём полные растры для всего спектра слоёв-предикторов
+    print("-- 4.1. Создаём полные растры для всего спектра слоёв-предикторов")
     rows_grid, cols_grid = np.indices((H, W))
     
     # Преобразуем их в одномерные массивы
@@ -184,6 +192,7 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     
     
     # 5) Дедупликация по пикселю (30″ клетка) — оставляем по одному наблюдению на клетку
+    print("\n-- 5. Дедупликация по пикселю — оставляем по одному наблюдению на клетку")
     pres_rc = pd.DataFrame({"r": rows, "c": cols}).drop_duplicates().values
     rows_p = pres_rc[:, 0]
     cols_p = pres_rc[:, 1]
@@ -196,7 +205,9 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
         f.write(f"\n{n_presence}")
     
     
-    # 6.1) если нужно генерировать точки псевдоприсутствия, но параметры заданы на авто
+    # 6) Генерация фоновых точек и точек псевдоотсутствия
+    print("\n-- 6. Генерация фоновых точек и точек псевдоотсутствия")
+    # 6.1) если нужно генерировать точки псевдоотсутствия, но параметры заданы на авто
     if BG_PC!=100 and BG_DISTANCE_MIN==0:
         print("Нужно генерировать точки псевдоприсутствия, и параметры огибающих заданы на авто. Определяем их.")
         if len(df['kingdom'].unique())==1 and len(df['class'].unique())<=1:
@@ -242,6 +253,7 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     
     
     # 7) Извлечение признаков
+    print("\n-- 7. Извлечение признаков")
     X_pres = extract_features_from_stack(stack, rows_p, cols_p)
     X_bg = extract_features_from_stack(stack, rows_bg, cols_bg)
     X_orig = extract_features_from_stack(stack, rows, cols)
@@ -255,12 +267,13 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     
     
     # 8) постройка гистограмм
+    print("\n-- 8. Постройка гистограмм")
     num_predictors = len(band_names) # Получаем точное количество предикторов
-    
     #print(SCALES_FILE)
-    print("\n-- Создание гистограмм")
+    
     with open(SCALES_FILE, 'r') as f:
         scales_config = json.load(f)
+        
     # Динамически определяем количество строк и столбцов для сетки
     # Делаем сетку максимально приближенной к квадрату
     cols_num = int(math.ceil(math.sqrt(num_predictors))) # Количество столбцов
@@ -274,7 +287,7 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
         axes = np.array([axes])
     elif num_predictors == 0:
         axes = np.array([]) # Пустой массив, если нет предикторов
-    
+        
     # Регулируем количество бинов, если оно больше, чем количество уникальных значений (что маловероятно, но для безопасности)
     bins_num = 50
     if bins_num > len(np.unique(X_pres)):
@@ -348,6 +361,7 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     
     
     # 9) Разделение на train/test
+    print("\n-- 9. Разделение на train/test")
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, stratify=y, random_state=RANDOM_SEED
     )
@@ -355,7 +369,7 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     
     
     # 10) Обучение модели
-    print("\n-- Обучение модели")
+    print("\n-- 10. Обучение модели")
     
     clf = RandomForestClassifier(
         n_estimators=500,
@@ -409,8 +423,9 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
         with open(pred_filename, 'a') as f:
             f.write(f"\n_{name:30s}:{imp:.4f}")
         
+        
     # 11) Прогноз на всю область и сохранение карты пригодности
-    print("\n-- Построение карты")
+    print("\n-- 11. Прогноз на всю область и сохранение карты пригодности")
     # Предсказываем только на валидных пикселях
     valid_idx = np.flatnonzero(valid_mask.ravel())
     flat = stack.reshape(bands, -1).T  # (H*W, bands)
@@ -454,6 +469,7 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     
     
     # 12) дальше рисуем картинку
+    print("\n-- 12. Рисуем карту")
     title = ''
     if (len(df['species'].unique())==1):
         title = 'Карта вероятности присутствия вида '+df['species'].unique()[0]
@@ -465,7 +481,7 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     
     # 13) если это стандартный регион - делаем с нашей моделью прогноз на будущее
     if MODEL_FUTURE==1:
-        print('Приступаю к прогнозу будущего')
+        print("\n-- 13. Приступаю к прогнозу будущего")
         # Пути
         TRAIN_DIR = os.path.join(OUTPUT_RASTER_DIR, "1970-2000")      # где лежат обучающие предикторы
         FUTURE_ROOT_DIR = os.path.join(OUTPUT_RASTER_DIR)   # где лежат папки периодов 2021-2040, ...
@@ -610,6 +626,7 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     
     print("\n-- Моделирование завершено")
     
+    jobs[IN_ID]['status'] = 'done'
     return {'result': 'Ok'}, 200
 
 

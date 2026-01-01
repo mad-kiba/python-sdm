@@ -27,3 +27,6 @@ dist/
 # OS generated files
 .DS_Store
 Thumbs.db
+
+examples/output/
+examples/output_predictors/
