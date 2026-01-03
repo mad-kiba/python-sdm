@@ -53,6 +53,11 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     month_filename = 'output/texts/'+str(IN_ID)+'_month.txt'
     csv_filename = 'output/texts/'+str(IN_ID)+'.csv'
     
+    # для запуска в многопоточном режиме
+    j = jobs.get(IN_ID)
+    if not j:
+        jobs[IN_ID] = {'status': 'queued', 'file': None, 'error': None}
+    
     # 1) Подготовка предикторов к нужным координатам
     print("\n-- 1. Подготовка предикторов ")
     clip_rasters(RAW_RASTER_DIR, OUTPUT_RASTER_DIR, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MAX_LON, MODEL_FUTURE)
@@ -72,12 +77,19 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     # 3) Загрузка присутствий
     print("\n-- 3. Загрузка наблюдений")
     if (os.path.isfile(IN_CSV)): # если это путь к файлу, читаем файл, иначе считаем дампом csv
-        with open(IN_CSV, 'r') as file: # читаем исходный файл
-            IN_CSV = file.read()
-    with open(csv_filename, 'a') as f: # записываем в архив
+        try:
+            with open(IN_CSV, 'r') as file: # читаем исходный файл
+                IN_CSV = file.read()
+        except Exception as e:
+            print('file read error')
+            jobs[IN_ID]['status'] = 'error'
+            jobs[IN_ID]['error'] = 'file read error'
+            return {"error": "file read error", "status": "terminated"}, 401
+    with open(csv_filename, 'w') as f: # записываем в архив
         f.write(IN_CSV)
     df = pd.read_csv(csv_filename, sep="\t", index_col=False, on_bad_lines='skip', low_memory=False)
     
+    # вычисление полей с координатами
     LAT_COL = 'lat'
     LON_COL = 'lon'
     
@@ -102,7 +114,7 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     # 3.1) Фильтрация мусорных данных из GBIF
     print("-- 3.1. Фильтрация мусорных данных из GBIF")
     if 'coordinateUncertaintyInMeters' in df.columns:
-        df['coordinateUncertaintyInMeters'] = df['coordinateUncertaintyInMeters'].fillna(0).astype(int)
+        df['coordinateUncertaintyInMeters'] = df['coordinateUncertaintyInMeters'].fillna(0).astype(float).astype(int) 
         df = df[df['coordinateUncertaintyInMeters']<1000]
         
     if 'collectionCode' in df.columns:
@@ -164,7 +176,7 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     
     with open(text_filename, 'a') as f:
         f.write(f"\n{len(rows)}")
-        
+    
     if len(rows)==0:
         print('Not enough points in region')
         jobs[IN_ID]['status'] = 'error'
