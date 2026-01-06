@@ -6,15 +6,17 @@ import json
 import math
 import glob
 import zipfile
+import time
 import matplotlib.pyplot as plt
+import xgboost as xgb
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import roc_auc_score
-import xgboost as xgb
 from rasterio.transform import xy
+from scipy.optimize import minimize
 
 from .data_loading import load_occurrences
-from .preprocessing import clip_rasters, load_raster_stack, points_to_pixel_indices
+from .preprocessing import clip_rasters, load_raster_stack, points_to_pixel_indices, pixel_indices_to_points
 from .preprocessing import sample_background, extract_features_from_stack
 from .utils.helpers import inverse_scale, save_geotiff
 from .utils.plot_utils import draw_map, create_beautiful_histogram
@@ -85,8 +87,10 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
             jobs[IN_ID]['status'] = 'error'
             jobs[IN_ID]['error'] = 'file read error'
             return {"error": "file read error", "status": "terminated"}, 401
+    
     with open(csv_filename, 'w') as f: # записываем в архив
         f.write(IN_CSV)
+    
     df = pd.read_csv(csv_filename, sep="\t", index_col=False, on_bad_lines='skip', low_memory=False)
     
     # вычисление полей с координатами
@@ -172,6 +176,7 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     # И те, что попадают на валидные пиксели (без NaN во всех слоях)
     valid_here = valid_mask[rows, cols]
     rows, cols = rows[valid_here], cols[valid_here]
+    
     print(f"Присутствий внутри валидной области: {len(rows)}")
     
     with open(text_filename, 'a') as f:
@@ -213,6 +218,8 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
         print("Внимание: очень мало уникальных присутствий в пределах растра.")
     print(f"Уникальных присутствий (по пикселю): {n_presence}")
     
+    rows_coord, cols_coord, inside = pixel_indices_to_points(rows_p, cols_p, transform, W, H)
+    
     with open(text_filename, 'a') as f:
         f.write(f"\n{n_presence}")
     
@@ -224,25 +231,25 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
         print("Нужно генерировать точки псевдоприсутствия, и параметры огибающих заданы на авто. Определяем их.")
         if len(df['kingdom'].unique())==1 and len(df['class'].unique())<=1:
             # значения по умолчанию
-            BG_DISTANCE_MIN = 5
-            BG_DISTANCE_MAX = 10
+            BG_DISTANCE_MIN = 10
+            BG_DISTANCE_MAX = 20
             
             # вычисляем параметры
             if df['class'].unique()==['Aves']: # Птицы
+                BG_DISTANCE_MIN = 50
+                BG_DISTANCE_MAX = 100
+                
+            if df['class'].unique()==['Mammalia']: # Млекопитающие
                 BG_DISTANCE_MIN = 20
                 BG_DISTANCE_MAX = 50
                 
-            if df['class'].unique()==['Mammalia']: # Млекопитающие
-                BG_DISTANCE_MIN = 10
-                BG_DISTANCE_MAX = 20
-                
             if df['class'].unique()==['Amphibia']: # Амфибии
-                BG_DISTANCE_MIN = 10
-                BG_DISTANCE_MAX = 20
+                BG_DISTANCE_MIN = 20
+                BG_DISTANCE_MAX = 50
                 
             if df['class'].unique()==['Squamata'] or df['class'].unique()==['Testudines']: # Рептилии
-                BG_DISTANCE_MIN = 10
-                BG_DISTANCE_MAX = 20
+                BG_DISTANCE_MIN = 20
+                BG_DISTANCE_MAX = 50
         else:
             BG_PC = 100
     
@@ -251,14 +258,20 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     
     
     # 6.2) Генерация фоновых точек
-    rng = np.random.default_rng(RANDOM_SEED)
-    n_bg = min(MAX_BG, BG_MULT * n_presence)
-    
-    BG_ABS_PC = 100 - BG_PC
+    if (IN_MODEL=='MaxEnt'):
+        BG_MULT = 100
+        BG_ABS_PC = 0
+        BG_PC = 100
+    else:
+        BG_ABS_PC = 100 - BG_PC
+        
     with open(text_filename, 'a') as f:
         f.write(f"\n{BG_PC},{BG_ABS_PC},{BG_DISTANCE_MIN},{BG_DISTANCE_MAX},{BG_MULT}")
         f.write(f"\n{IN_MIN_LAT},{IN_MIN_LON},{IN_MAX_LAT},{IN_MAX_LON},{IN_RESOLUTION},{IN_MODEL}")
-    
+            
+    rng = np.random.default_rng(RANDOM_SEED)
+    n_bg = min(MAX_BG, BG_MULT * n_presence)
+        
     
     rows_bg, cols_bg = sample_background(valid_mask, set(map(tuple, pres_rc)), n_bg, rng, BG_PC, BG_DISTANCE_MIN, BG_DISTANCE_MAX, text_filename)
     #print(f"Сэмплировано фоновых точек: {len(rows_bg)}")
@@ -383,38 +396,43 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     # 10) Обучение модели
     print("\n-- 10. Обучение модели")
     
-    clf = RandomForestClassifier(
-        n_estimators=500,
-        n_jobs=-1,
-        random_state=RANDOM_SEED,
-        class_weight="balanced_subsample",
-        max_depth=10
-    )
-    
-    xgbm = xgb.XGBClassifier(
-        objective='binary:logistic',
-        n_estimators=500,        # Количество деревьев
-        learning_rate=0.05,      # Скорость обучения
-        max_depth=10,             # Максимальная глубина деревьев
-        subsample=0.8,           # Доля объектов для обучения каждого дерева
-        colsample_bytree=0.8,    # Доля признаков для обучения каждого дерева
-        random_state=RANDOM_SEED,
-        n_jobs=-1,               # Использовать все доступные ядра CPU
-        #use_label_encoder=False,
-        eval_metric='auc',
-        tree_method='hist'       # Хорошо работает с большими данными
-    )
-    
+    if (IN_MODEL=='MaxEnt'):
+        model = MaxEnt(X_pres=X_pres, X_bg=X_bg)
+        model.fit(
+            maxiter=500,
+            tol=1e-5
+        )
     
     if (IN_MODEL=='RandomForest'):
-        model = clf
+        model = RandomForestClassifier(
+            n_estimators=500,
+            n_jobs=-1,
+            random_state=RANDOM_SEED,
+            class_weight="balanced_subsample",
+            max_depth=10
+        )
+        model.fit(X_train, y_train)
         
     if (IN_MODEL=='XGBoost'):
-        model = xgbm
+        model = xgb.XGBClassifier(
+            objective='binary:logistic',
+            n_estimators=500,        # Количество деревьев
+            learning_rate=0.05,      # Скорость обучения
+            max_depth=10,             # Максимальная глубина деревьев
+            subsample=0.8,           # Доля объектов для обучения каждого дерева
+            colsample_bytree=0.8,    # Доля признаков для обучения каждого дерева
+            random_state=RANDOM_SEED,
+            n_jobs=-1,               # Использовать все доступные ядра CPU
+            eval_metric='auc',
+            tree_method='hist'       # Хорошо работает с большими данными
+        )
+        
+        model.fit(X_train, y_train)
     
-    model.fit(X_train, y_train)
     
     y_prob = model.predict_proba(X_test)[:, 1]
+    #print(model.predict_proba(X_test))
+    
     auc = roc_auc_score(y_test, y_prob)
     print(f"ROC AUC (holdout): {auc:.3f}")
     
@@ -428,7 +446,11 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
             f.write(f"\nне определён")
     
     # Важность переменных
-    importances = model.feature_importances_
+    if (IN_MODEL=='MaxEnt'):
+        importances = model.weights
+    else:
+        importances = model.feature_importances_
+    
     print("Важность предикторов:")
     for name, imp in sorted(zip(band_names, importances), key=lambda x: -x[1]):
         print(f"  {name:30s} {imp:.4f}")
@@ -485,14 +507,16 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     title = ''
     if (len(df['species'].unique())==1):
         title = 'Карта вероятности присутствия вида '+df['species'].unique()[0]
-    draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title)
+    adtitle = f"\nМодель: {IN_MODEL}, шаг: {IN_RESOLUTION}, уник. точек: {n_presence}, ROC-AUC: {auc:.3f}";
+    title = title + adtitle
+    draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title, rows_coord, cols_coord)
     
     
     
     
     
     # 13) если это стандартный регион - делаем с нашей моделью прогноз на будущее
-    if MODEL_FUTURE==1:
+    if MODEL_FUTURE==1 and IN_MODEL!='MaxEnt':
         print("\n-- 13. Приступаю к прогнозу будущего")
         # Пути
         TRAIN_DIR = os.path.join(OUTPUT_RASTER_DIR, "1970-2000")      # где лежат обучающие предикторы
@@ -520,27 +544,12 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
         X = np.vstack([X_pres, X_bg])
         y = np.hstack([np.ones(len(X_pres), dtype=int), np.zeros(len(X_bg), dtype=int)])
         
-        
-        xgbm_std = xgb.XGBClassifier(
-            objective='binary:logistic',
-            n_estimators=500,        # Количество деревьев
-            learning_rate=0.05,      # Скорость обучения
-            max_depth=10,             # Максимальная глубина деревьев
-            subsample=0.8,           # Доля объектов для обучения каждого дерева
-            colsample_bytree=0.8,    # Доля признаков для обучения каждого дерева
-            random_state=RANDOM_SEED,
-            n_jobs=-1,               # Использовать все доступные ядра CPU
-            #use_label_encoder=False,
-            eval_metric='auc',
-            tree_method='hist'       # Хорошо работает с большими данными
-        )
-        
-        xgbm_std.fit(X, y)
+        model.fit(X, y)
         
         
         # 13.2) Прогноз на всю область и сохранение карты пригодности по текущему периоду
         # Чтобы не упереться в память, делаем батчами
-        suitability = predict_suitability_for_stack(xgbm_std, stack_train, valid_mask_train, batch_size=500_000)
+        suitability = predict_suitability_for_stack(model, stack_train, valid_mask_train, batch_size=500_000)
         
         OUTPUT_SUITABILITY_TIF = OUTPUT_FUTURE_DIR + "/1970-2000.tif"
         save_geotiff(OUTPUT_SUITABILITY_TIF, suitability, profile)
@@ -550,7 +559,7 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
         if (len(df['species'].unique())==1):
             title = 'Карта вероятности присутствия вида '+df['species'].unique()[0]+"\nТекущий период (базовые климатические переменные)"
         OUTPUT_SUITABILITY_JPG = OUTPUT_FUTURE_DIR + "/1970-2000.jpg"
-        draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title)
+        draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title, rows_coord, cols_coord)
         print(f"Карта пригодности сохранена: {OUTPUT_SUITABILITY_JPG}")
         os.remove(OUTPUT_SUITABILITY_TIF)
         
@@ -565,12 +574,12 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
                                    if os.path.isdir(os.path.join(period_dir, d))):
                 scen_dir = os.path.join(period_dir, scenario)
                 print(f"\nПрогноз: {period} / {scenario}")
-        
+                
                 # Загружаем будущие предикторы строго в порядке PREDICTORS_STD;
                 # если load_raster_stack не гарантирует порядок, переупорядочим по именам
                 stack_fut, valid_mask_fut, transform_fut, crs_fut, profile_fut, band_names_fut = \
                     load_raster_stack(scen_dir, PREDICTORS_STD)
-        
+                
                 # Проверка и переупорядочивание при необходимости
                 if set(band_names_fut) != set(PREDICTORS_STD_EXP):
                     print(f"Пропуск {period}/{scenario}: набор слоёв не совпадает с обучающим.")
@@ -580,13 +589,13 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
                     idx = [band_names_fut.index(b) for b in PREDICTORS_STD_EXP]
                     stack_fut = stack_fut[idx, :, :]
                     band_names_fut = [band_names_fut[i] for i in idx]
-        
+                
                 # (Необязательно) Проверка совместимости CRS/разрешения
                 if crs_fut != crs_train:
                     print(f"Внимание: CRS отличается у {period}/{scenario} (train={crs_train}, fut={crs_fut}).")
-        
-                suitability_f = predict_suitability_for_stack(xgbm_std, stack_fut, valid_mask_fut, batch_size=500_000)
-        
+                
+                suitability_f = predict_suitability_for_stack(model, stack_fut, valid_mask_fut, batch_size=500_000)
+                
                 out_name = f"{period}-{scenario}.tif"
                 out_path = os.path.join(OUTPUT_FUTURE_DIR, out_name)
                 save_geotiff(out_path, suitability_f, profile_fut)
@@ -610,7 +619,7 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
                 if (len(df['species'].unique())==1):
                     title = 'Карта вероятности присутствия вида '+df['species'].unique()[0]+"\nПериод: "+period+" (сценарий "+scenario+")"
                 
-                draw_map(out_path, out_path_img, title)
+                draw_map(out_path, out_path_img, title, rows_coord, cols_coord)
                 os.remove(out_path)
                 
                 
@@ -643,7 +652,7 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
 
 
 # Вспомогательная функция предсказания по стеку батчами
-def predict_suitability_for_stack(trained_clf, stack, valid_mask, batch_size=500_000):
+def predict_suitability_for_stack(model, stack, valid_mask, batch_size=500_000):
     bands, H, W = stack.shape
     flat = stack.reshape(bands, -1).T  # (H*W, bands)
     suitability_flat = np.full(H * W, np.nan, dtype="float32")
@@ -652,6 +661,164 @@ def predict_suitability_for_stack(trained_clf, stack, valid_mask, batch_size=500
         end = start + batch_size
         sel = valid_idx[start:end]
         X_pred = flat[sel]
-        pred = trained_clf.predict_proba(X_pred)[:, 1].astype("float32")
+        pred = model.predict_proba(X_pred)[:, 1].astype("float32")
         suitability_flat[sel] = pred
     return suitability_flat.reshape(H, W)
+
+
+
+
+class MaxEnt:
+    """
+    Минимальная реализация модели максимальной энтропии (MaxEnt)
+    для моделирования ареала вида.
+
+    Args:
+        X_pres (np.ndarray): Массив предикторов в точках присутствия.
+                             Форма: (n_pres, n_features).
+        X_bg (np.ndarray): Массив предикторов в фоновых точках.
+                           Форма: (n_bg, n_features).
+                           Ожидается, что n_bg >> n_pres.
+    """
+    def __init__(self, X_pres, X_bg):
+        self.X_pres = np.asarray(X_pres)
+        self.X_bg = np.asarray(X_bg)
+
+        if self.X_pres.ndim == 1:
+            self.X_pres = self.X_pres.reshape(-1, 1)
+        if self.X_bg.ndim == 1:
+            self.X_bg = self.X_bg.reshape(-1, 1)
+
+        if self.X_pres.shape[1] != self.X_bg.shape[1]:
+            raise ValueError("Количество признаков в X_pres и X_bg должно совпадать.")
+
+        self.n_pres = self.X_pres.shape[0]
+        self.n_bg = self.X_bg.shape[0]
+        self.n_features = self.X_pres.shape[1]
+
+        # Создаем объединенный набор данных для обучения
+        # y=1 для точек присутствия, y=0 для фоновых точек
+        self.X_train = np.vstack((self.X_pres, self.X_bg))
+        self.y_train = np.array([1] * self.n_pres + [0] * self.n_bg)
+
+        # Веса признаков (инициализируем нулями)
+        self.weights = np.zeros(self.n_features)
+
+        # Важность признаков (будет заполнена после обучения)
+        self._feature_importances_ = None
+
+    def _sigmoid(self, z):
+        """Логистическая функция (сигмоида)."""
+        return 1 / (1 + np.exp(-z))
+
+    def _predict_linear(self, X):
+        """Линейная комбинация весов и признаков."""
+        # Добавляем фиктивный признак для свободного члена (bias)
+        # Если у вас уже есть столбец единиц в X, этот шаг можно пропустить
+        # Но для минимальной реализации лучше добавить его явным образом
+        X_with_bias = np.hstack((X, np.ones((X.shape[0], 1))))
+        return np.dot(X_with_bias, self.weights)
+
+    def _predict_proba_internal(self, X):
+        """Внутренний метод предсказания вероятности (без добавления bias)."""
+        return self._sigmoid(np.dot(X, self.weights[:-1]) + self.weights[-1]) # bias - последний вес
+
+    def _objective_function(self, weights):
+        """
+        Целевая функция (отрицательная логарифмическая правдоподобность)
+        для минимизации.
+        """
+        X_train_with_bias = np.hstack((self.X_train, np.ones((self.X_train.shape[0], 1))))
+        linear_output = np.dot(X_train_with_bias, weights)
+        predictions = self._sigmoid(linear_output)
+
+        # Добавляем небольшое значение к предсказаниям, чтобы избежать log(0)
+        epsilon = 1e-9
+        predictions = np.clip(predictions, epsilon, 1. - epsilon)
+
+        # Лосс-функция (кросс-энтропия)
+        loss = -np.mean(self.y_train * np.log(predictions) + (1 - self.y_train) * np.log(1 - predictions))
+        return loss
+
+    def fit(self, optimizer='L-BFGS-B', maxiter=1000, tol=1e-4):
+        """
+        Обучает модель максимальной энтропии, находя оптимальные веса признаков.
+
+        Args:
+            optimizer (str): Алгоритм оптимизации. По умолчанию 'lbfgs'.
+                             Другие варианты: 'cg', 'newton-cg', 'nelder-mead' и др.
+            maxiter (int): Максимальное количество итераций для оптимизатора.
+            tol (float): Допустимая погрешность для остановки оптимизации.
+        """
+        print("Начало обучения модели MaxEnt...")
+        
+        # Добавляем фиктивный признак для свободного члена (bias) к обучающим данным
+        X_train_with_bias = np.hstack((self.X_train, np.ones((self.X_train.shape[0], 1))))
+        
+        n_weights = self.n_features + 1 # +1 для bias
+        
+        # Инициализируем веса нулями.
+        # Можно использовать другие стратегии инициализации, но для простоты - нули.
+        initial_weights = np.zeros(n_weights)
+        
+        # Оптимизируем веса, минимизируя целевую функцию
+        result = minimize(self._objective_function,
+                          initial_weights,
+                          method=optimizer,
+                          options={'maxiter': maxiter, 'gtol': tol}) # gtol - градиентная толерантность
+        
+        if not result.success:
+            print(f"Предупреждение: Оптимизация не завершилась успешно: {result.message}")
+
+        self.weights = result.x
+        print("Обучение завершено.")
+
+        # Вычисление важности признаков
+        # Для MaxEnt, важность признака можно аппроксимировать абсолютным значением его веса
+        # или квадратом веса. Здесь используем абсолютное значение.
+        # Bias не учитывается как отдельный признак важности
+        self._feature_importances_ = np.abs(self.weights[:-1])
+
+    @property
+    def feature_importances_(self):
+        """
+        Возвращает важность каждого признака.
+
+        Важность признака аппроксимируется абсолютным значением его веса
+        после обучения модели.
+        """
+        if self._feature_importances_ is None:
+            raise RuntimeError("Модель не была обучена. Вызовите метод .fit() сначала.")
+        return self._feature_importances_
+
+    def predict_proba(self, X):
+        """
+        Предсказывает вероятность присутствия вида в новых точках.
+
+        Args:
+            X (np.ndarray): Массив предикторов для новых точек.
+                            Форма: (n_new_points, n_features).
+
+        Returns:
+            np.ndarray: Массив вероятностей присутствия для каждой точки.
+                        Форма: (n_new_points,).
+        """
+        X = np.asarray(X)
+        if X.ndim == 1:
+            X = X.reshape(-1, 1)
+        if X.shape[1] != self.n_features:
+            raise ValueError(f"Ожидалось {self.n_features} признаков, но получено {X.shape[1]}.")
+
+        # Добавляем столбец единиц для свободного члена (bias)
+        X_with_bias = np.hstack((X, np.ones((X.shape[0], 1))))
+
+        # Линейная комбинация + сигмоида
+        # Здесь мы используем weights[:-1] для признаков и weights[-1] для bias
+        linear_model = np.dot(X, self.weights[:-1]) + self.weights[-1]
+        probabilities = self._sigmoid(linear_model)
+        
+        probabilities_absence = 1 - probabilities
+
+        return np.column_stack((probabilities_absence, probabilities))
+    
+    

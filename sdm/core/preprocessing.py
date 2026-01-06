@@ -244,6 +244,49 @@ def points_to_pixel_indices(lons, lats, transform, width, height):
     return rows, cols, inside
 
 
+def pixel_indices_to_points(rows, cols, transform, width, height):
+    """
+    Преобразует индексы пикселей (row, col) обратно в координаты (lon, lat).
+
+    Args:
+        rows (np.ndarray): Массив индексов строк пикселей.
+        cols (np.ndarray): Массив индексов столбцов пикселей.
+        transform (affine.Affine): Объект Transform из rasterio, описывающий
+                                   геопривязку растра.
+        width (int): Ширина растра (количество столбцов).
+        height (int): Высота растра (количество строк).
+
+    Returns:
+        tuple: Кортеж, содержащий:
+            - lons (np.ndarray): Массив долгот, соответствующих индексам пикселей.
+            - lats (np.ndarray): Массив широт, соответствующих индексам пикселей.
+            - inside (np.ndarray): Булев массив, указывающий, какие пиксели
+                                   находятся в пределах границ растра.
+    """
+    # Создаем массивы для хранения результатов
+    lons = np.empty(len(rows))
+    lats = np.empty(len(rows))
+    inside = np.empty(len(rows), dtype=bool)
+    
+    # Итерируемся по каждому индексу пикселя
+    for i, (row, col) in enumerate(zip(rows, cols)):
+        # Проверяем, находится ли пиксель в пределах границ растра
+        if 0 <= row < height and 0 <= col < width:
+            # Используем метод `transform` для получения координат (x, y)
+            # x соответствует долготе, y - широте
+            lon, lat = transform * (col, row) # Обратите внимание на порядок: col для x, row для y
+            lons[i] = lon
+            lats[i] = lat
+            inside[i] = True
+        else:
+            # Если пиксель вне границ, присваиваем NaN или другое значение по умолчанию
+            lons[i] = np.nan
+            lats[i] = np.nan
+            inside[i] = False
+    
+    return lons, lats, inside
+
+
 def extract_features_from_stack(stack, rows, cols):
     """Извлекает значения предикторов из стека по индексам пикселей.
        Возвращает X: (n_samples, n_bands)."""

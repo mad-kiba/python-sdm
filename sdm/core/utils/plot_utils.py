@@ -2,13 +2,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 from rasterio.transform import array_bounds
 import contextily as ctx
-from pyproj import Transformer
+from pyproj import CRS, Transformer
 from matplotlib.ticker import FuncFormatter, MaxNLocator
+from shapely.geometry import Point
 
 from .helpers import get_predictor_stats, format_float
 from .gis_utils import read_and_to_3857
 
-def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title = ''):
+def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title = '', rows=[], cols=[]):
     data, transform, width, height = read_and_to_3857(OUTPUT_SUITABILITY_TIF) 
     
     # Границы растра в координатах EPSG:3857
@@ -54,7 +55,7 @@ def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title = ''):
     base_fs = plt.rcParams.get('font.size', 10)
     tick_fs = max(6, int(base_fs * 0.5))   # подписи делений осей
     label_fs = max(7, int(base_fs * 0.6))  # подписи осей
-    title_fs = max(8, int(base_fs * 0.7))  # заголовок
+    title_fs = max(9, int(base_fs * 0.7))  # заголовок
     
     # Видимая область и равный масштаб по X и Y — чтобы поля выглядели одинаково
     ax.set_xlim(xmin_v, xmax_v)
@@ -64,9 +65,7 @@ def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title = ''):
     # Подложка OSM
     ctx.add_basemap(
         ax,
-        source=ctx.providers.OpenStreetMap.Mapnik,
-        #crs="EPSG:3857",
-        #attribution_size=6,
+        source=ctx.providers.OpenStreetMap.Mapnik
     )
     
     # Растровая подложка (ваш GeoTIFF) поверх OSM
@@ -78,12 +77,27 @@ def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title = ''):
         vmin=0.0,
         vmax=1.0,
         interpolation="bilinear",  # чуть более плавно и приятно глазу
-        alpha=0.8,
+        alpha=0.8
     )
     
     # Цветовая шкала
     cbar = fig.colorbar(im, ax=ax, fraction=0.035, pad=0.03)
     cbar.set_label("Вероятность присутствия")
+    
+    #print(rows)
+    #print(cols)
+    
+    #print(xmin, xmax)
+    #print(ymin, ymax)
+    
+    transformer = Transformer.from_crs(CRS("EPSG:4326"), CRS("EPSG:3857"), always_xy=True)
+    x_3857, y_3857 = transformer.transform(rows, cols)
+    
+    # наносим точки встреч на карту
+    if len(rows)>0:
+        ax.scatter(x_3857, y_3857, marker='o', s=5, color='red', alpha=0.7, zorder=100)
+        ax.scatter(x_3857, y_3857, marker='o', s=4, color='yellow', alpha=0.7, zorder=100)
+        #print(f"Added {len(x_3857)} observation points to the map in EPSG:3857 using manual coordinate calculation.")
     
     # Оси в градусах (слева и снизу)
     transformer = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
