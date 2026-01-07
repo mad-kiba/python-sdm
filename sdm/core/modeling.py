@@ -506,7 +506,7 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     print("\n-- 12. Рисуем карту")
     title = ''
     if (len(df['species'].unique())==1):
-        title = 'Карта вероятности присутствия вида '+df['species'].unique()[0]
+        title = 'Карта вероятности присутствия вида '+df['species'].unique()[0]+f" ({IN_ID})"
     adtitle = f"\nМодель: {IN_MODEL}, шаг: {IN_RESOLUTION}, уник. точек: {n_presence}, ROC-AUC: {auc:.3f}";
     title = title + adtitle
     draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title, rows_coord, cols_coord)
@@ -557,7 +557,7 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
         
         title = ''
         if (len(df['species'].unique())==1):
-            title = 'Карта вероятности присутствия вида '+df['species'].unique()[0]+"\nТекущий период (базовые климатические переменные)"
+            title = 'Карта вероятности присутствия вида '+df['species'].unique()[0]+f" ({IN_ID})\nТекущий период (базовые климатические переменные)"
         OUTPUT_SUITABILITY_JPG = OUTPUT_FUTURE_DIR + "/1970-2000.jpg"
         draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title, rows_coord, cols_coord)
         print(f"Карта пригодности сохранена: {OUTPUT_SUITABILITY_JPG}")
@@ -617,7 +617,7 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
                 
                 title = ''
                 if (len(df['species'].unique())==1):
-                    title = 'Карта вероятности присутствия вида '+df['species'].unique()[0]+"\nПериод: "+period+" (сценарий "+scenario+")"
+                    title = 'Карта вероятности присутствия вида '+df['species'].unique()[0]+f" ({IN_ID})\nПериод: "+period+" (сценарий "+scenario+")"
                 
                 draw_map(out_path, out_path_img, title, rows_coord, cols_coord)
                 os.remove(out_path)
