@@ -27,6 +27,10 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     print("-- Регион для моделирования: ")
     print("("+str(IN_MIN_LAT)+","+str(IN_MIN_LON)+"), ("+str(IN_MAX_LAT)+","+str(IN_MAX_LON)+")")
     
+    if IN_MIN_LAT==0 and IN_MAX_LAT==0:
+        jobs[IN_ID]['status'] = 'done'
+        return {'result': 'Ok'}, 200
+    
     RANDOM_SEED = 42
     
     OUTPUT_SUITABILITY_TIF = "output/suitability_"+str(IN_ID)+".tif"  # куда сохранить карту пригодности
@@ -40,7 +44,7 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     
     SCALES_FILE = os.path.join(RAW_RASTER_DIR, 'predictors_scales.json')
     
-    OUTPUT_RASTER_DIR = "output_predictors/("+str(IN_MIN_LAT)+","+str(IN_MIN_LON)+"), ("+str(IN_MAX_LAT)+","+str(IN_MAX_LON)+")"
+    OUTPUT_RASTER_DIR = "output_predictors/"+IN_RESOLUTION+"/("+str(IN_MIN_LAT)+","+str(IN_MIN_LON)+"), ("+str(IN_MAX_LAT)+","+str(IN_MAX_LON)+")"
     RASTER_DIR = OUTPUT_RASTER_DIR # папка с GeoTIFF-предикторами
     
     # Сколько фоновых точек генерировать: мин(10000, 10 * N_presence)
@@ -62,7 +66,7 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     
     # 1) Подготовка предикторов к нужным координатам
     print("\n-- 1. Подготовка предикторов ")
-    clip_rasters(RAW_RASTER_DIR, OUTPUT_RASTER_DIR, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MAX_LON, MODEL_FUTURE)
+    clip_rasters(RAW_RASTER_DIR, OUTPUT_RASTER_DIR, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MAX_LON, MODEL_FUTURE, IN_RESOLUTION)
     
     # 2) Загрузка стека предикторов
     print("\n-- 2. Загрузка предикторов ")
@@ -85,8 +89,8 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
         except Exception as e:
             print('file read error')
             jobs[IN_ID]['status'] = 'error'
-            jobs[IN_ID]['error'] = 'file read error'
-            return {"error": "file read error", "status": "terminated"}, 401
+            jobs[IN_ID]['error'] = 'Ошибка чтения файла. Проверьте, что файл не пустой.'
+            return {"error": "Ошибка чтения файла. Проверьте, что файл не пустой.", "status": "terminated"}, 401
     
     with open(csv_filename, 'w') as f: # записываем в архив
         f.write(IN_CSV)
@@ -112,8 +116,8 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     if not LAT_COL in df.columns:
         print('csv parse error')
         jobs[IN_ID]['status'] = 'error'
-        jobs[IN_ID]['error'] = 'csv parse error'
-        return {"error": "csv parse error", "status": "terminated"}, 401
+        jobs[IN_ID]['error'] = 'Ошибка обработки csv. Проверьте, что у входных данных корректный формат.'
+        return {"error": "Ошибка обработки csv. Проверьте, что у входных данных корректный формат.", "status": "terminated"}, 401
     
     # 3.1) Фильтрация мусорных данных из GBIF
     print("-- 3.1. Фильтрация мусорных данных из GBIF")
@@ -161,16 +165,15 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     if len(occ)==0:
         print('Not enough points')
         jobs[IN_ID]['status'] = 'error'
-        jobs[IN_ID]['error'] = 'not enough points'
-        return {"error": "not enough points", "status": "terminated"}, 401
+        jobs[IN_ID]['error'] = 'Во входных данных нет наблюдений. Проверьте источник.'
+        return {"error": "Во входных данных нет наблюдений. Проверьте источник.", "status": "terminated"}, 401
     
     
     
     
     # 4) Привязка присутствий к пикселям растра и фильтрация по маске валидности
     print("\n-- 4. Привязка присутствий к пикселям растра и фильтрация по маске валидности")
-    rows, cols, inside = points_to_pixel_indices(occ[LON_COL].values, occ[LAT_COL].values,
-                                                 transform, W, H)
+    rows, cols, inside = points_to_pixel_indices(occ[LON_COL].values, occ[LAT_COL].values, transform, W, H)
     # Фильтруем те, что внутри растра
     rows, cols = rows[inside], cols[inside]
     # И те, что попадают на валидные пиксели (без NaN во всех слоях)
@@ -182,11 +185,11 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
     with open(text_filename, 'a') as f:
         f.write(f"\n{len(rows)}")
     
-    if len(rows)==0:
+    if len(rows)<10:
         print('Not enough points in region')
         jobs[IN_ID]['status'] = 'error'
-        jobs[IN_ID]['error'] = 'not enough points in region'
-        return {"error": "not enough points in region", "status": "terminated"}, 401
+        jobs[IN_ID]['error'] = f"Внутри области моделирования недостаточно точек. Должно быть не менее 10, сейчас: {len(rows)}."
+        return {"error": f"Внутри области моделирования недостаточно точек. Должно быть не менее 10, сейчас: {len(rows)}.", "status": "terminated"}, 401
     
     
     # 4.1) создаём полные растры для всего спектра слоёв-предикторов

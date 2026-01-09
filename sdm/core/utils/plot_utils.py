@@ -151,7 +151,7 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
     """
     
     bio_info = {
-        'roughness_std3x3': "Шероховатость рельефа (стандартное отклонение на сетке 3х3 км)",
+        'roughness_std3x3': "Пересечённость рельефа (стандартное отклонение на сетке 3х3 км)",
         'slope_deg': "Уклон рельефа на заданном шаге модели",
         'wc2.1_30s_elev': "WC ELEV: Высота над уровнем моря",
         'wc2.1_30s_bio_1': "WC BIO1: Среднегодовая температура (Mean annual temperature)",

@@ -118,7 +118,7 @@ def process_single_geotiff(input_filepath: str, output_dir: str, target_crs: str
         return None
 
 
-def clip_rasters(RAW_RASTER_DIR, OUTPUT_RASTER_DIR, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MAX_LON, MODEL_FUTURE):
+def clip_rasters(RAW_RASTER_DIR, OUTPUT_RASTER_DIR, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MAX_LON, MODEL_FUTURE, IN_RESOLUTION):
     if IN_MIN_LAT==0:
         return
     
@@ -126,7 +126,13 @@ def clip_rasters(RAW_RASTER_DIR, OUTPUT_RASTER_DIR, IN_MIN_LAT, IN_MIN_LON, IN_M
     #print(RAW_RASTER_DIR)
     #print(OUTPUT_RASTER_DIR)
     
-    TARGET_RESOLUTION_DEG = 30 / 3600.0  
+    if IN_RESOLUTION == '30s':
+        TARGET_RESOLUTION_DEG = 30 / 3600.0
+    if IN_RESOLUTION == '1m':
+        TARGET_RESOLUTION_DEG = 2 * 30 / 3600.0
+    if IN_RESOLUTION == '5m':
+        TARGET_RESOLUTION_DEG = 10 * 30 / 3600.0    
+        
     TARGET_CRS = "EPSG:4326"
     BBOX = (IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MAX_LON)
     
