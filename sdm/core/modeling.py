@@ -19,13 +19,13 @@ from .data_loading import load_occurrences
 from .preprocessing import clip_rasters, load_raster_stack, points_to_pixel_indices, pixel_indices_to_points
 from .preprocessing import sample_background, extract_features_from_stack
 from .utils.helpers import inverse_scale, save_geotiff
-from .utils.plot_utils import draw_map, create_beautiful_histogram
+from .utils.plot_utils import draw_map, create_beautiful_histogram, create_animated_gif
 
 
 def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MAX_LON, IN_RESOLUTION, MODEL_FUTURE, IN_MODEL,
             BG_MULT, BG_DISTANCE_MIN, BG_DISTANCE_MAX, BG_PC, jobs):
     print("-- Регион для моделирования: ")
-    print("("+str(IN_MIN_LAT)+","+str(IN_MIN_LON)+"), ("+str(IN_MAX_LAT)+","+str(IN_MAX_LON)+")")
+    print("("+str(IN_MIN_LAT)+","+str(IN_MIN_LON)+"), ("+str(IN_MAX_LAT)+","+str(IN_MAX_LON)+"), step: "+IN_RESOLUTION)
     
     if IN_MIN_LAT==0 and IN_MAX_LAT==0:
         jobs[IN_ID]['status'] = 'done'
@@ -568,7 +568,9 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
         
         
         
+        
         # 13.3) Прогноз для будущих периодов/сценариев
+        future_imgs = {}
         for period in sorted(d for d in os.listdir(FUTURE_ROOT_DIR)
                              if os.path.isdir(os.path.join(FUTURE_ROOT_DIR, d))):
             period_dir = os.path.join(FUTURE_ROOT_DIR, period)
@@ -615,6 +617,14 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
                 
                 out_name_img = f"{period}-{scenario}.{count_high_suitability05}.{count_high_suitability50}.{count_high_suitability95}.jpg"
                 out_path_img = os.path.join(OUTPUT_FUTURE_DIR, out_name_img)
+                
+                # записываем в список прогнозов будущего
+                if scenario not in future_imgs:
+                    future_imgs[scenario] = []
+                future_imgs[scenario].append(out_path_img)
+                if period=='2081-2100':
+                    future_imgs[scenario].append(out_path_img)
+                
                 #print(out_path)
                 #print(out_path_img)
                 
@@ -624,8 +634,15 @@ def run_sdm(IN_ID, IN_CSV, PREDICTORS, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MA
                 
                 draw_map(out_path, out_path_img, title, rows_coord, cols_coord)
                 os.remove(out_path)
-                
-                
+        
+        print(f"\nСоздаём анимацию:")
+        for k in future_imgs:
+            output_gif_path = os.path.join(OUTPUT_FUTURE_DIR, k+".gif")
+            
+            frame_duration_ms = 600
+            create_animated_gif(future_imgs[k], output_gif_path, duration=frame_duration_ms)
+            
+        
         print(f"\nВсе прогнозы сохранены в папку: '{OUTPUT_FUTURE_DIR}'")
 
         archive_name = "futures.zip"

@@ -441,60 +441,17 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100, dista
     current_total = len(all_rows)
     remaining_to_sample = n_bg - current_total
     
+    
     if remaining_to_sample > 0:
-        print(f"ВНИМАНИЕ: Сгенерировано {current_total} фоновых точек, вместо желаемых {n_bg}. Попытка добрать {remaining_to_sample} из оставшейся территории.")
-
-        # Создаем маску для оставшихся кандидатов:
-        # Это должны быть валидные пиксели, которые еще не были выбраны.
-        final_selection_mask = valid_mask.copy()
-
-        # Исключаем точки присутствия
-        if presence_rc_set:
-            pres_linear_indices = []
-            for r, c in presence_rc_set:
-                if 0 <= r < height and 0 <= c < width and valid_mask[r, c]:
-                    pres_linear_indices.append(r * width + c)
-            
-            if pres_linear_indices:
-                pres_linear_indices = np.array(pres_linear_indices, dtype=np.int64)
-                presence_linear_mask = np.zeros(valid_mask.size, dtype=bool)
-                presence_linear_mask[pres_linear_indices] = True
-                final_selection_mask.ravel()[presence_linear_mask] = False
-
-        # Исключаем точки, которые уже были выбраны (из случайной и буферной частей)
-        already_chosen_linear = []
-        if len(rows_random) > 0:
-            already_chosen_linear.extend(rows_random * width + cols_random)
-        if len(rows_buffer) > 0:
-            already_chosen_linear.extend(rows_buffer * width + cols_buffer)
-        
-        if already_chosen_linear:
-            already_chosen_linear = np.array(already_chosen_linear, dtype=np.int64)
-            # Убедимся, что индексы в пределах размера массива
-            valid_already_chosen_linear = already_chosen_linear[(already_chosen_linear >= 0) & (already_chosen_linear < final_selection_mask.size)]
-            
-            if len(valid_already_chosen_linear) > 0:
-                already_chosen_mask = np.zeros(final_selection_mask.size, dtype=bool)
-                already_chosen_mask[valid_already_chosen_linear] = True
-                final_selection_mask.ravel()[already_chosen_mask] = False
-
-        final_candidates = np.flatnonzero(final_selection_mask)
-        
-        if final_candidates.size > 0:
-            n_to_add = min(remaining_to_sample, final_candidates.size)
-            chosen_extra = rng.choice(final_candidates, size=n_to_add, replace=False)
-            rows_extra = chosen_extra // width
-            cols_extra = chosen_extra % width
-            all_rows = np.concatenate((all_rows, rows_extra))
-            all_cols = np.concatenate((all_cols, cols_extra))
+        print(f"ВНИМАНИЕ: Сгенерировано {current_total} фоновых точек, вместо желаемых {n_bg}.")
 
     # Перемешиваем финальный набор точек
     if len(all_rows) > 0:
         indices = rng.permutation(len(all_rows))
         all_rows = all_rows[indices]
         all_cols = all_cols[indices]
-        
+    
     with open(text_filename, 'a') as f:
             f.write(f"\n{len(rows_random)},{len(rows_buffer)}")
-
+    
     return all_rows, all_cols

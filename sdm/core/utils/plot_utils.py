@@ -5,9 +5,56 @@ import contextily as ctx
 from pyproj import CRS, Transformer
 from matplotlib.ticker import FuncFormatter, MaxNLocator
 from shapely.geometry import Point
+from PIL import Image
 
 from .helpers import get_predictor_stats, format_float
 from .gis_utils import read_and_to_3857
+
+
+def create_animated_gif(image_paths, output_path="animation.gif", duration=500):
+    """
+    Создает анимированный GIF из списка путей к изображениям.
+
+    Args:
+        image_paths (list): Список строк, где каждая строка — путь к файлу изображения.
+        output_path (str): Путь для сохранения выходного GIF файла.
+        duration (int): Время отображения каждого кадра в миллисекундах.
+                        (Например, 500ms = 0.5 секунды на кадр).
+    """
+    images = []
+    for path in image_paths:
+        try:
+            img = Image.open(path)
+            # Важно: Для GIF лучше, чтобы все кадры имели одинаковый режим (например, 'RGB' или 'RGBA').
+            # Если режим отличается, Pillow может работать некорректно.
+            # Если ваши изображения имеют разные режимы, можно добавить конвертацию:
+            # img = img.convert('RGB')
+            images.append(img)
+        except FileNotFoundError:
+            print(f"Ошибка: Файл не найден по пути: {path}")
+            return
+        except Exception as e:
+            print(f"Ошибка при открытии файла {path}: {e}")
+            return
+
+    if not images:
+        print("Не удалось загрузить ни одного изображения.")
+        return
+
+    # Сохраняем GIF
+    # append_images: список остальных кадров, кроме первого
+    # save_all=True: указывает Pillow сохранить все кадры
+    # duration: время отображения каждого кадра
+    # loop: 0 означает бесконечную зацикленность GIF
+    images[0].save(
+        output_path,
+        save_all=True,
+        append_images=images[1:],
+        duration=duration,
+        loop=0
+    )
+    print(f"Анимированный GIF сохранен как: {output_path}")
+    
 
 def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title = '', rows=[], cols=[]):
     data, transform, width, height = read_and_to_3857(OUTPUT_SUITABILITY_TIF) 
