@@ -1,3 +1,5 @@
+import cv2
+import os
 import numpy as np
 import matplotlib.pyplot as plt
 from rasterio.transform import array_bounds
@@ -10,6 +12,56 @@ from PIL import Image
 from .helpers import get_predictor_stats, format_float
 from .gis_utils import read_and_to_3857
 
+
+def create_avi_from_images(image_paths, output_avi_path='output.avi', fps=1):
+    """
+    Создает видеофайл AVI из массива путей к четырем изображениям.
+
+    Args:
+        image_paths (list): Список из четырех строк, где каждая строка -
+                            путь к одному изображению.
+        output_avi_path (str): Путь, по которому будет сохранен выходной AVI файл.
+                               По умолчанию 'output.avi'.
+        fps (int): Количество кадров в секунду для выходного видео.
+                   По умолчанию 1 кадр в секунду.
+    """
+    # 1. Чтение изображений
+    images = []
+    for img_path in image_paths:
+        # Проверяем существование файла
+        print(img_path)
+        if not os.path.exists(img_path):
+            print(f"Файл не найден: {img_path}")
+            raise FileNotFoundError(f"Файл не найден: {img_path}")
+        img = cv2.imread(img_path)
+        if img is None:
+            print(f"Не удалось прочитать изображение: {img_path}. Возможно, файл поврежден или имеет неверный формат.")
+            raise IOError(f"Не удалось прочитать изображение: {img_path}. Возможно, файл поврежден или имеет неверный формат.")
+        images.append(img)
+    
+    # 2. Определение размеров видео (все изображения должны иметь одинаковый размер)
+    height, width, layers = images[0].shape
+    
+    for i, img in enumerate(images[1:]):
+        h, w, _ = img.shape
+        if h != height or w != width:
+            raise ValueError(f"Изображения должны иметь одинаковый размер. "
+                             f"Изображение {image_paths[0]} имеет размер {width}x{height}, "
+                             f"а изображение {image_paths[i+1]} имеет размер {w}x{h}.")
+    
+    # 3. Определение кодека и создание объекта VideoWriter
+    #    CV_FOURCC используется для указания кодека.
+    #    'XVID' - один из популярных и хорошо поддерживаемых кодеков для AVI.
+    #    Другие варианты: 'MJPG', 'DIVX', 'H264' (может требовать установки кодеков).
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    video = cv2.VideoWriter(output_avi_path, fourcc, fps, (width, height))
+    
+    # 4. Запись каждого изображения в видео
+    for img in images:
+        video.write(img)
+
+    print(f"Видеофайл успешно создан: {output_avi_path}")
+    
 
 def create_animated_gif(image_paths, output_path="animation.gif", duration=500):
     """

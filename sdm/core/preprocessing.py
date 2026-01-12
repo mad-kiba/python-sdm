@@ -141,14 +141,24 @@ def clip_rasters(RAW_RASTER_DIR, OUTPUT_RASTER_DIR, IN_MIN_LAT, IN_MIN_LON, IN_M
     processed_files_count = 0
 
     for root, _, files in os.walk(RAW_RASTER_DIR):
-        if MODEL_FUTURE == 0 and root != RAW_RASTER_DIR:
-            continue  # обрабатывать только файлы в корневой папке
+        # пропускаем обработку предикторов будущего, если это не требуется
+        if MODEL_FUTURE == 0:
+            if '2021-2040' in root:
+                continue
+            if '2041-2060' in root:
+                continue
+            if '2061-2080' in root:
+                continue
+            if '2081-2100' in root:
+                continue
     
         # Относительный путь текущей подпапки относительно корня RAW_RASTER_DIR
         rel_dir = os.path.relpath(root, RAW_RASTER_DIR)
         # Для корня rel_dir == '.', поэтому избегаем добавления '.' в путь
         output_subdir = os.path.join(OUTPUT_RASTER_DIR, '' if rel_dir == '.' else rel_dir)
         os.makedirs(output_subdir, exist_ok=True)
+        
+        #print(f"\nТекущая папка: {root}")
         
         for filename in files:
             if filename.lower().endswith((".tif", ".tiff")):
@@ -180,18 +190,68 @@ def clip_rasters(RAW_RASTER_DIR, OUTPUT_RASTER_DIR, IN_MIN_LAT, IN_MIN_LON, IN_M
     print(f"Результаты сохранены в папку: '{OUTPUT_RASTER_DIR}'")
 
 
-def load_raster_stack(raster_dir, predictors = 'all'):
+def load_raster_stack(raster_dir, predictors = 'all', period='current'):
     """Считывает все GeoTIFF из папки и строит стек (bands, H, W).
        Возвращает: stack(float32), valid_mask(bool), transform, crs, profile, band_names(list)"""
     
-    all_tifs = sorted(glob.glob(os.path.join(raster_dir, "*.tif")))
+    # У нас предикторы делятся на статические и динамические.
+    # Для моделирования настоящего - объединяем их.
+    static_subdir = os.path.join(raster_dir, "static")
+    if period=='current':
+        dynamic_subdir = os.path.join(raster_dir, "dynamic_current")
+    else:
+        dynamic_subdir = os.path.join(raster_dir, "dynamic_predictable/"+period)
+    
+    # Собираем файлы из подпапки "static"
+    static_tifs = glob.glob(os.path.join(static_subdir, "*.tif"))
+    
+    # Собираем файлы из подпапки "dynamic_current"
+    dynamic_tifs = glob.glob(os.path.join(dynamic_subdir, "*.tif"))
+    
+    # Объединяем оба списка
+    all_available_tifs = []
+    all_available_tifs.extend(static_tifs)
+    all_available_tifs.extend(dynamic_tifs)
+        
+    print(f"Входной путь для предикторов: {raster_dir}")
+    print(f"Статические предикторы: {static_subdir}")
+    print(f"Динамические предикторы: {dynamic_subdir}")
+    
+    #print('----------------')
+    #print('Все предикторы:')
+    #print(all_available_tifs)
+    #print('Нужные предикторы:')
+    #print(predictors)
+    #print('----------------')
     
     # фильтруем по входящему списку предикторов
     if predictors.strip().lower() == 'all':
-        tifs = sorted(glob.glob(os.path.join(raster_dir, "*.tif")))
+        # Если 'all', используем все найденные файлы
+        desired_filenames_no_ext = [os.path.splitext(os.path.basename(f))[0] for f in all_available_tifs]
+        desired_tifs_ordered = all_available_tifs # Изначальный порядок из glob
     else:
-        predictor_files = [f"{p.strip()}.tif" for p in predictors.split(',')]
-        tifs = [f_path for f_path in all_tifs if os.path.basename(f_path) in predictor_files]
+        
+        # Создаем список желаемых имен файлов (без .tif)
+        predictor_names_no_ext = [p.strip() for p in predictors.split(',')]
+        
+        # Создаем полный список ожидаемых имен файлов (.tif)
+        expected_full_filenames = [f"{name}.tif" for name in predictor_names_no_ext]
+        
+        # Фильтруем все доступные файлы, чтобы остались только те, что в списке ожидаемых
+        # и сохраняем их в порядке, заданном в predictors
+        desired_tifs_ordered = []
+        
+        for expected_filename in expected_full_filenames:
+            found = False
+            # Ищем файл в уже собранном списке all_available_tifs
+            for available_file_path in all_available_tifs:
+                if os.path.basename(available_file_path) == expected_filename:
+                    desired_tifs_ordered.append(available_file_path)
+                    found = True
+                    break # Переходим к следующему ожидаемому файлу
+    
+    tifs = desired_tifs_ordered
+    
     
     if not tifs:
         expected_files_str = ", ".join(predictor_files)
