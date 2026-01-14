@@ -9,8 +9,8 @@ from matplotlib.ticker import FuncFormatter, MaxNLocator
 from shapely.geometry import Point
 from PIL import Image
 
-from .helpers import get_predictor_stats, format_float
-from .gis_utils import read_and_to_3857
+from .utils import get_predictor_stats, format_float
+from .utils import read_and_to_3857
 
 
 def create_avi_from_images(image_paths, output_avi_path='output.avi', fps=1):
