@@ -6,13 +6,13 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="sdm", # Название пакета, которое будет использоваться при pip install
-    version="0.1.0",
-    author="Ваше Имя",
+    version="0.8.0",
+    author="madkiba",
     author_email="ogletix@gmail.com",
-    description="Python library for Species Distribution Modeling (SDM)",
+    description="Python library for Species Distribution Modeling (Python-SDM)",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/mad-kiba/sdm-library", # URL вашего репозитория
+    url="https://github.com/mad-kiba/sdm-library",
     packages=find_packages(exclude=["tests", "examples"]), # Автоматически находит пакеты
     install_requires=[
         "numpy>=1.20.0",
@@ -22,7 +22,6 @@ setup(
         "scikit-learn>=1.0.0",
         "matplotlib>=3.5.0",
         "seaborn>=0.11.0",
-        # Добавьте сюда все необходимые зависимости
     ],
     classifiers=[
         "Programming Language :: Python :: 3",
@@ -32,10 +31,10 @@ setup(
         "Intended Audience :: Science/Research",
     ],
     python_requires=">=3.7", # Минимальная версия Python
-    entry_points={
-        # Если вы делаете CLI утилиту
-        'console_scripts': [
-            'sdm=sdm.cli.sdm_cli:main',
-        ],
-    },
+    #entry_points={
+    #    # Если вы делаете CLI утилиту
+    #    'console_scripts': [
+    #        'sdm=sdm.cli.sdm_cli:main',
+    #    ],
+    #},
 )

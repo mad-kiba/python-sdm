@@ -169,7 +169,8 @@ def extract_features_from_stack(stack, rows, cols):
 
 
 # Сэмплирует n_bg фоновых пикселей, разделяя их на две части
-def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100, distance_min_pixels = 1, distance_max_pixels = 1, text_filename = ''):
+def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
+                      distance_min_pixels = 1, distance_max_pixels = 1, text_filename = '', month = 0):
     """
     Сэмплирует n_bg фоновых пикселей, разделяя их на две части:
     1. 50% точек - случайно в пределах valid_mask (исключая точки присутствия).
@@ -187,6 +188,7 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100, dista
     Returns:
         tuple: Кортеж (rows_bg, cols_bg) - массивы строк и столбцов фоновых точек.
     """
+    
     height, width = valid_mask.shape
 
     # --- Часть 1: Случайный фон по всей valid_mask ---
@@ -225,9 +227,10 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100, dista
     print(f"Сгенерировано фоновых точек: {n_bg_random}")
 
     # если не требуется брать точки с границ
-    if bg_pc==100:
-        with open(text_filename, 'a') as f:
-            f.write(f"\n{len(rows_random)}")
+    if bg_pc == 100:
+        if month == 0:
+            with open(text_filename, 'a') as f:
+                f.write(f"\n{len(rows_random)}")
         return rows_random, cols_random
     
     # --- Часть 2: Фон в "огибающей" (буфере) ---
@@ -238,15 +241,17 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100, dista
     
     if n_bg_buffer_target <= 0:
         # Если уже набрали достаточно случайных точек, возвращаем их
-        with open(text_filename, 'a') as f:
-            f.write(f"\n{len(rows_random)}")
+        if month == 0:
+            with open(text_filename, 'a') as f:
+                f.write(f"\n{len(rows_random)}")
         return rows_random, cols_random
     
     # Если точек присутствия нет, буферная часть не может быть сгенерирована
     if not presence_rc_set:
         print("ВНИМАНИЕ: Отсутствуют точки присутствия для генерации фона в огибающей.")
-        with open(text_filename, 'a') as f:
-            f.write(f"\n{len(rows_random)}")
+        if month == 0:
+            with open(text_filename, 'a') as f:
+                f.write(f"\n{len(rows_random)}")
         return rows_random, cols_random
     
     # 1. Создаем массив расстояний до ближайшей точки присутствия
@@ -317,7 +322,8 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100, dista
         all_rows = all_rows[indices]
         all_cols = all_cols[indices]
     
-    with open(text_filename, 'a') as f:
+    if month == 0:
+        with open(text_filename, 'a') as f:
             f.write(f"\n{len(rows_random)},{len(rows_buffer)}")
     
     return all_rows, all_cols

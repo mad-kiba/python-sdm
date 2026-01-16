@@ -34,8 +34,8 @@ class PythonSDM:
         print("("+str(self.IN_MIN_LAT)+","+str(self.IN_MIN_LON)+"), ("+str(self.IN_MAX_LAT)+","+str(self.IN_MAX_LON)+"), step: "+self.IN_RESOLUTION)
         
         if self.IN_MIN_LAT==0 and self.IN_MAX_LAT==0:
-            self.JOBS[IN_ID]['status'] = 'done'
-            return {'result': 'Ok'}, 200
+            self.JOBS[self.IN_ID]['status'] = 'done'
+            return {'result': 'Ok', 'code': 200}
         
         self.RANDOM_SEED = 42
         
@@ -43,8 +43,10 @@ class PythonSDM:
         self.OUTPUT_SUITABILITY_JPG = "output/suitability_"+str(self.IN_ID)+".jpg"
         self.OUTPUT_HISTOGRAMS_DIR = "output/gistos"
         self.OUTPUT_PREDICTIONS_DIR = "output/predictions"
+        self.OUTPUT_SEASONS_DIR = "output/seasons"
         
         self.OUTPUT_FUTURE_DIR = os.path.join(self.OUTPUT_PREDICTIONS_DIR, str(self.IN_ID))
+        self.OUTPUT_SEASONS_DIR = os.path.join(self.OUTPUT_SEASONS_DIR, str(self.IN_ID))
         
         self.RAW_RASTER_DIR = "input_predictors"
         
@@ -65,6 +67,8 @@ class PythonSDM:
         self.STACK_FILENAME = 'output/texts/'+str(self.IN_ID)+'_stack.txt'
         self.MONTH_FILENAME = 'output/texts/'+str(self.IN_ID)+'_month.txt'
         self.CSV_FILENAME = 'output/texts/'+str(self.IN_ID)+'.csv'
+        
+        os.makedirs('output/texts/', exist_ok=True)
         
         # для запуска в многопоточном режиме
         j = self.JOBS.get(self.IN_ID)
@@ -96,6 +100,7 @@ class PythonSDM:
         self.LON_COL = ret['LON_COL']
         self.df = ret['df']
         self.occ = ret['occ']
+        self.source_occ = ret['occ']
     
     
     def load_predictors(self):
@@ -117,8 +122,15 @@ class PythonSDM:
             f.write(f"\n{self.band_names}")
     
     
-    def prepare_data(self):
+    def prepare_data(self, month = 0):
         # 4) Привязка присутствий к пикселям растра и фильтрация по маске валидности
+        if (month!=0):
+            self.occ = self.source_occ.dropna()
+            self.occ.loc[:, 'month'] = self.occ['month'].astype(int)
+            self.occ = self.occ[(self.occ['month'])==month]
+        else:
+            self.occ = self.source_occ
+        
         print(f"\n-- 4. Привязка присутствий к пикселям растра и фильтрация по маске валидности ({self.IN_ID})")
         rows, cols, inside = points_to_pixel_indices(self.occ[self.LON_COL].values, self.occ[self.LAT_COL].values,\
                                                      self.transform, self.W, self.H)
@@ -130,10 +142,11 @@ class PythonSDM:
         
         print(f"Присутствий внутри валидной области: {len(rows)}")
         
-        with open(self.TEXT_FILENAME, 'a') as f:
-            f.write(f"\n{len(rows)}")
+        if month==0:
+            with open(self.TEXT_FILENAME, 'a') as f:
+                f.write(f"\n{len(rows)}")
         
-        if len(rows)<10:
+        if len(rows)<10 and month=='':
             print('Not enough points in region')
             self.JOBS[self.IN_ID]['status'] = 'error'
             self.JOBS[self.IN_ID]['error'] = f"Внутри области моделирования недостаточно точек. Должно быть не менее 10, сейчас: {len(rows)}."
@@ -160,7 +173,7 @@ class PythonSDM:
         self.cols = cols
         
         
-    def deduplicate_data(self):
+    def deduplicate_data(self, month = 0):
         # 5) Дедупликация по пикселю (30″ клетка) — оставляем по одному наблюдению на клетку
         print(f"\n-- 5. Дедупликация по пикселю — оставляем по одному наблюдению на клетку ({self.IN_ID})")
         self.pres_rc = pd.DataFrame({"r": self.rows, "c": self.cols}).drop_duplicates().values
@@ -171,23 +184,24 @@ class PythonSDM:
             print("Внимание: очень мало уникальных присутствий в пределах растра.")
         print(f"Уникальных присутствий (по пикселю): {n_presence}")
         
-        if n_presence<5:
+        if n_presence<5 and month==0:
             print('Not enough unique points in region')
-            jobs[IN_ID]['status'] = 'error'
-            jobs[IN_ID]['error'] = f"Внутри области моделирования очень мало уникальных присутствий. Должно быть не менее 5, сейчас: {n_presence}."
+            self.JOBS[IN_ID]['status'] = 'error'
+            self.JOBS[IN_ID]['error'] = f"Внутри области моделирования очень мало уникальных присутствий. Должно быть не менее 5, сейчас: {n_presence}."
             return {"error": f"Внутри области моделирования очень мало уникальных присутствий. Должно быть не менее 5, сейчас: {n_presence}.", "status": "terminated"}, 401
         
         self.rows_coord, self.cols_coord, inside = pixel_indices_to_points(rows_p, cols_p, self.transform, self.W, self.H)
         
-        with open(self.TEXT_FILENAME, 'a') as f:
-            f.write(f"\n{n_presence}")
+        if month==0:
+            with open(self.TEXT_FILENAME, 'a') as f:
+                f.write(f"\n{n_presence}")
             
         self.n_presence = n_presence
         self.rows_p = rows_p
         self.cols_p = cols_p
 
 
-    def generate_bg_pa(self):
+    def generate_bg_pa(self, month = 0):
         # 6) Генерация фоновых точек и точек псевдоотсутствия
         print(f"\n-- 6. Генерация фоновых точек и точек псевдоотсутствия ({self.IN_ID})")
         # 6.1) если нужно генерировать точки псевдоотсутствия, но параметры заданы на авто
@@ -229,17 +243,19 @@ class PythonSDM:
             self.BG_PC = 100
         else:
             self.BG_ABS_PC = 100 - self.BG_PC
-            
-        with open(self.TEXT_FILENAME, 'a') as f:
-            f.write(f"\n{self.BG_PC},{self.BG_ABS_PC},{self.BG_DISTANCE_MIN},{self.BG_DISTANCE_MAX},{self.BG_MULT}")
-            f.write(f"\n{self.IN_MIN_LAT},{self.IN_MIN_LON},{self.IN_MAX_LAT},{self.IN_MAX_LON},{self.IN_RESOLUTION},{self.IN_MODEL}")
+        
+        if month==0:
+            with open(self.TEXT_FILENAME, 'a') as f:
+                f.write(f"\n{self.BG_PC},{self.BG_ABS_PC},{self.BG_DISTANCE_MIN},{self.BG_DISTANCE_MAX},{self.BG_MULT}")
+                f.write(f"\n{self.IN_MIN_LAT},{self.IN_MIN_LON},{self.IN_MAX_LAT},{self.IN_MAX_LON},{self.IN_RESOLUTION},{self.IN_MODEL}")
                 
         rng = np.random.default_rng(self.RANDOM_SEED)
         n_bg = min(self.MAX_BG, self.BG_MULT * self.n_presence)
-            
         
         self.rows_bg, self.cols_bg = sample_background(self.valid_mask, set(map(tuple, self.pres_rc)), n_bg,
-                                             rng, self.BG_PC, self.BG_DISTANCE_MIN, self.BG_DISTANCE_MAX, self.TEXT_FILENAME)
+                                                       rng, self.BG_PC, self.BG_DISTANCE_MIN, self.BG_DISTANCE_MAX,
+                                                       self.TEXT_FILENAME, month)
+                
         print(f"Сэмплировано фоновых точек: {len(self.rows_bg)}")
 
     
@@ -360,7 +376,7 @@ class PythonSDM:
         )
         
         
-    def train_model(self):
+    def train_model(self, month = 0):
         # 10) Обучение модели
         print(f"\n-- 10. Обучение модели ({self.IN_ID})")
         
@@ -404,14 +420,15 @@ class PythonSDM:
         self.auc = roc_auc_score(self.y_test, y_prob)
         print(f"ROC AUC (holdout): {self.auc:.3f}")
         
-        with open(self.TEXT_FILENAME, 'a') as f:
-            f.write(f"\n{self.auc:.3f}")
-            
-            if (len(self.df['species'].unique())==1):
-                title = self.df['species'].unique()[0]
-                f.write(f"\n{title}")
-            else:
-                f.write(f"\nне определён")
+        if month==0:
+            with open(self.TEXT_FILENAME, 'a') as f:
+                f.write(f"\n{self.auc:.3f}")
+                
+                if (len(self.df['species'].unique())==1):
+                    title = self.df['species'].unique()[0]
+                    f.write(f"\n{title}")
+                else:
+                    f.write(f"\nне определён")
         
         # Важность переменных
         if (self.IN_MODEL=='MaxEnt'):
@@ -419,14 +436,15 @@ class PythonSDM:
         else:
             importances = self.model.feature_importances_
         
-        print("Важность предикторов:")
-        for name, imp in sorted(zip(self.band_names, importances), key=lambda x: -x[1]):
-            print(f"  {name:30s} {imp:.4f}")
-            with open(self.PRED_FILENAME, 'a') as f:
-                f.write(f"\n_{name:30s}:{imp:.4f}")
+        if month==0:
+            print("Важность предикторов:")
+            for name, imp in sorted(zip(self.band_names, importances), key=lambda x: -x[1]):
+                print(f"  {name:30s} {imp:.4f}")
+                with open(self.PRED_FILENAME, 'a') as f:
+                    f.write(f"\n_{name:30s}:{imp:.4f}")
 
 
-    def predict_current(self):
+    def predict_current(self, month = 0):
         # 11) Прогноз на всю область и сохранение карты пригодности
         print(f"\n-- 11. Прогноз на всю область и сохранение карты пригодности ({self.IN_ID})")
         # Предсказываем только на валидных пикселях
@@ -445,6 +463,15 @@ class PythonSDM:
             suitability_flat[sel] = pred
             
         suitability = suitability_flat.reshape(self.H, self.W)
+        
+        if (month!=0):
+            self.OUTPUT_SUITABILITY_TIF = "output/suitability_"+str(self.IN_ID)+"_"+str(month)+".tif"
+            self.OUTPUT_SUITABILITY_JPG = "output/seasons/"+str(self.IN_ID)+"/cur_"+str(month)+".jpg"
+        else:
+            self.OUTPUT_SUITABILITY_TIF = "output/suitability_"+str(self.IN_ID)+".tif"
+            self.OUTPUT_SUITABILITY_TIF_ORIG = "output/suitability_"+str(self.IN_ID)+".tif"
+            self.OUTPUT_SUITABILITY_JPG = "output/suitability_"+str(self.IN_ID)+".jpg"
+        
         save_geotiff(self.OUTPUT_SUITABILITY_TIF, suitability, self.profile)
         print(f"Карта пригодности сохранена: {self.OUTPUT_SUITABILITY_TIF}")
         
@@ -457,10 +484,11 @@ class PythonSDM:
         mask_high_suitability95 = suitability > 0.95
         count_high_suitability95 = np.sum(mask_high_suitability95)
         
-        with open(self.TEXT_FILENAME, 'a') as f:
-            f.write(f"\nCHS05:{count_high_suitability05}")
-            f.write(f"\nCHS50:{count_high_suitability50}")
-            f.write(f"\nCHS95:{count_high_suitability95}")
+        if month==0:
+            with open(self.TEXT_FILENAME, 'a') as f:
+                f.write(f"\nCHS05:{count_high_suitability05}")
+                f.write(f"\nCHS50:{count_high_suitability50}")
+                f.write(f"\nCHS95:{count_high_suitability95}")
         
         # (Опционально) можно сохранить также использованные точки присутствия в пиксельных координатах
         # или вернуть их центры в географических координатах:
@@ -471,7 +499,7 @@ class PythonSDM:
         print("Сохранены использованные присутствия (уникальные по пикселю): used_presences_"+str(self.IN_ID)+".csv")
     
     
-    def draw_map_current(self):
+    def draw_map_current(self, month = 0):
         # 12) дальше рисуем картинку
         print(f"\n-- 12. Рисуем карту ({self.IN_ID})")
         title = ''
@@ -480,8 +508,22 @@ class PythonSDM:
         adtitle = f"\nМодель: {self.IN_MODEL}, шаг: {self.IN_RESOLUTION}, уник. точек: {self.n_presence}, ROC-AUC: {self.auc:.3f}";
         title = title + adtitle
         
-        draw_map(self.OUTPUT_SUITABILITY_TIF, self.OUTPUT_SUITABILITY_JPG, title, self.rows_coord, self.cols_coord)
+        if month!=0:
+            title = title + ", месяц: "+str(month)
         
+        if self.n_presence>5:
+            #print('---Tif:'+self.OUTPUT_SUITABILITY_TIF)
+            draw_map(self.OUTPUT_SUITABILITY_TIF, self.OUTPUT_SUITABILITY_JPG, title, self.rows_coord, self.cols_coord)
+        else:
+            #print('---Tif:'+self.OUTPUT_SUITABILITY_TIF_ORIG)
+            draw_map(self.OUTPUT_SUITABILITY_TIF_ORIG, self.OUTPUT_SUITABILITY_JPG, title, self.rows_coord, self.cols_coord, 1)
+        
+        if month!=0:
+            self.monthly_imgs.append(self.OUTPUT_SUITABILITY_JPG)
+            if self.OUTPUT_SUITABILITY_TIF_ORIG!=self.OUTPUT_SUITABILITY_TIF:
+                if os.path.exists(self.OUTPUT_SUITABILITY_TIF):
+                    os.remove(self.OUTPUT_SUITABILITY_TIF)
+    
     
     def predict_future(self):
         # 13) если это стандартный регион - делаем с нашей моделью прогноз на будущее
@@ -605,10 +647,10 @@ class PythonSDM:
             try:
                 for k in future_imgs:
                     output_gif_path = os.path.join(self.OUTPUT_FUTURE_DIR, k+".gif")
-                    output_avi_path = os.path.join(self.OUTPUT_FUTURE_DIR, k+".avi")
+                    output_mp4_path = os.path.join(self.OUTPUT_FUTURE_DIR, k+".mp4")
                     
                     create_animated_gif(future_imgs[k], output_gif_path, duration=600)
-                    create_avi_from_images(future_imgs[k], output_avi_path, 2)
+                    create_avi_from_images(future_imgs[k], output_mp4_path, 2)
             except Exception as e:
                 print("Ошибка создания анимации: " + str(e))
                 
@@ -634,5 +676,61 @@ class PythonSDM:
             
             print(f"Все файлы из '{self.OUTPUT_FUTURE_DIR}' успешно упакованы в '{archive_path}'.")
             
-            
     
+    def predict_monthly(self):
+        # 14) сезонный прогноз
+        if self.DO_SEASON == 1:
+            print(f"\n-- 14. Приступаю к помесячному моделированию")
+            self.monthly_imgs = []
+            os.makedirs("output/seasons/"+str(self.IN_ID), exist_ok=True)
+            
+            try:
+                for month in range(1, 13):
+                    print(f"\n---- Прогноз для месяца {month}")
+                    self.prepare_data(month)
+                    self.deduplicate_data(month)
+                    if self.n_presence>5:
+                        self.generate_bg_pa(month)
+                        self.extract_features()
+                        self.split_train_test()
+                        self.train_model(month)
+                        self.predict_current(month)
+                    self.OUTPUT_SUITABILITY_JPG = "output/seasons/"+str(self.IN_ID)+"/cur_"+str(self.IN_ID)+"_"+str(month)+".jpg"
+                    self.draw_map_current(month)
+            except Exception as e:
+                print(e)
+                return {'status': 'terminated', 'error': e, 'code': 401}
+            
+            
+            # 14.1) Анимания сезонности
+            print(f"\nСоздаём сезонности:")
+            try:
+                output_gif_path = os.path.join(self.OUTPUT_SEASONS_DIR, "monthly_"+str(self.IN_ID)+".gif")
+                output_mp4_path = os.path.join(self.OUTPUT_SEASONS_DIR, "monthly_"+str(self.IN_ID)+".mp4")
+                
+                create_animated_gif(self.monthly_imgs, output_gif_path, duration=600)
+                create_avi_from_images(self.monthly_imgs, output_mp4_path, 2)
+            except Exception as e:
+                print("Ошибка создания анимации: " + str(e))
+                
+                
+            # 14.2) Упаковываем сезонность в архив
+            print("\n-- Упаковка сезонных прогнозов")
+            archive_name = "seasons.zip"
+            archive_path = os.path.join(self.OUTPUT_SEASONS_DIR, archive_name)
+            #print("Путь к архиву: "+archive_path)
+            files_to_zip = glob.glob(os.path.join(self.OUTPUT_SEASONS_DIR, "*"))
+            #print("Файлы для упаковки: ")
+            #print(files_to_zip)
+            
+            if not files_to_zip:
+                print(f"В папке {self.OUTPUT_SEASONS_DIR} нет файлов для упаковки.")
+            else:
+                with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                    for file_path in files_to_zip:
+                        zipf.write(file_path, os.path.basename(file_path))
+                        
+            
+            print("-- Конец помесячного моделирования")
+
+

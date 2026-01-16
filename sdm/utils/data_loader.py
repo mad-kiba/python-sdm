@@ -5,14 +5,17 @@ import json
 import glob
 import rasterio
 
-def load_occurrences(df, lon_col, lat_col): 
+def load_occurrences(df, lon_col, lat_col, month_col=''): 
     """Загружает CSV с наблюдениями, фильтрует некорректные координаты."""
-    #df = pd.read_csv(csv_path, sep=";")
-    df[lat_col] = df[lat_col].astype(float)
-    df[lon_col] = df[lon_col].astype(float)
+    df.loc[:, lat_col] = df[lat_col].astype(float)
+    df.loc[:, lon_col] = df[lon_col].astype(float)
     if lon_col not in df.columns or lat_col not in df.columns:
         raise ValueError(f"В CSV нет столбцов {lon_col}/{lat_col}")
-    df = df[[lon_col, lat_col]].dropna()
+    if month_col=='':
+        df = df[[lon_col, lat_col]]
+    else:
+        df = df[[lon_col, lat_col, month_col]]
+    df = df.dropna(subset=[lon_col, lat_col])
     # Базовая фильтрация координат
     df = df[(df[lon_col] >= -180) & (df[lon_col] <= 180) & (df[lat_col] >= -90) & (df[lat_col] <= 90)]
     df = df.reset_index(drop=True)
@@ -89,9 +92,10 @@ def load_species_occurrence_data(IN_ID, IN_CSV, CSV_FILENAME, MONTH_FILENAME, TE
     df_coord_filtered = df_coord_filtered[df_coord_filtered[LON_COL]>IN_MIN_LAT]
     df_coord_filtered = df_coord_filtered[df_coord_filtered[LON_COL]<IN_MAX_LAT]
     
-    
+    month_col = ''
     if 'month' in df_coord_filtered.columns:
         # MONTH_FILENAME
+        MONTH_COL = 'month'
         df_cleaned = df_coord_filtered.dropna(subset=['year', 'month'])
         df_cleaned['year'] = df_cleaned['year'].astype(int)
         df_cleaned['month'] = df_cleaned['month'].astype(int)
@@ -105,7 +109,7 @@ def load_species_occurrence_data(IN_ID, IN_CSV, CSV_FILENAME, MONTH_FILENAME, TE
     
     # 2.3) финальные присустсвия
     print(f"-- 2.3. Финальные присутствия ({IN_ID})")
-    occ = load_occurrences(df, LON_COL, LAT_COL)
+    occ = load_occurrences(df, LON_COL, LAT_COL, MONTH_COL)
     print("\n-- Обработка наблюдений")
     print(f"Осталось записей финально CSV: {len(occ)}")
     

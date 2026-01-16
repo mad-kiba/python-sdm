@@ -13,14 +13,14 @@ from .utils import get_predictor_stats, format_float
 from .utils import read_and_to_3857
 
 
-def create_avi_from_images(image_paths, output_avi_path='output.avi', fps=1):
+def create_avi_from_images(image_paths, output_mp4_path='output.mp4', fps=1):
     """
     Создает видеофайл AVI из массива путей к четырем изображениям.
 
     Args:
         image_paths (list): Список из четырех строк, где каждая строка -
                             путь к одному изображению.
-        output_avi_path (str): Путь, по которому будет сохранен выходной AVI файл.
+        output_mp4_path (str): Путь, по которому будет сохранен выходной AVI файл.
                                По умолчанию 'output.avi'.
         fps (int): Количество кадров в секунду для выходного видео.
                    По умолчанию 1 кадр в секунду.
@@ -53,14 +53,16 @@ def create_avi_from_images(image_paths, output_avi_path='output.avi', fps=1):
     #    CV_FOURCC используется для указания кодека.
     #    'XVID' - один из популярных и хорошо поддерживаемых кодеков для AVI.
     #    Другие варианты: 'MJPG', 'DIVX', 'H264' (может требовать установки кодеков).
-    fourcc = cv2.VideoWriter_fourcc(*'XVID')
-    video = cv2.VideoWriter(output_avi_path, fourcc, fps, (width, height))
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v') # Или 'avc1'
+    video = cv2.VideoWriter(output_mp4_path, fourcc, fps, (width, height))
     
     # 4. Запись каждого изображения в видео
     for img in images:
         video.write(img)
+        
+    video.release() 
 
-    print(f"Видеофайл успешно создан: {output_avi_path}")
+    print(f"Видеофайл успешно создан: {output_mp4_path}")
     
 
 def create_animated_gif(image_paths, output_path="animation.gif", duration=500):
@@ -73,6 +75,8 @@ def create_animated_gif(image_paths, output_path="animation.gif", duration=500):
         duration (int): Время отображения каждого кадра в миллисекундах.
                         (Например, 500ms = 0.5 секунды на кадр).
     """
+    print('Файлы в GIF:')
+    print(image_paths)
     images = []
     for path in image_paths:
         try:
@@ -108,8 +112,16 @@ def create_animated_gif(image_paths, output_path="animation.gif", duration=500):
     print(f"Анимированный GIF сохранен как: {output_path}")
     
 
-def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title = '', rows=[], cols=[]):
-    data, transform, width, height = read_and_to_3857(OUTPUT_SUITABILITY_TIF) 
+def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title = '', rows=[], cols=[], map_only=0):
+    data, transform, width, height = read_and_to_3857(OUTPUT_SUITABILITY_TIF)
+    
+    # если наблюдений меньше пяти и моделирования не было, рисуем только точки
+    if map_only==1:
+        data = data * 0
+        
+    #print('---')
+    #print(data)
+    #print('---')
     
     # Границы растра в координатах EPSG:3857
     xmin, ymin, xmax, ymax = array_bounds(height, width, transform)
@@ -118,11 +130,13 @@ def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title = '', rows=[]
     pad_x_req = (xmax - xmin) * 0.05
     pad_y_req = (ymax - ymin) * 0.05
     pad_m = max(pad_x_req, pad_y_req)
+    pad_m = 0 # попробуем без паддингов?
     
     xmin_v, xmax_v = xmin - pad_m, xmax + pad_m
     ymin_v, ymax_v = ymin - pad_m, ymax + pad_m
     
     # Колормэп с прозрачностью по NaN (нет данных)
+    #cmap = plt.cm.Blues.copy()
     cmap = plt.cm.magma.copy()
     cmap.set_bad(alpha=0.0)
     
@@ -232,7 +246,7 @@ def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title = '', rows=[]
         ax.set_title(title, pad=8, fontsize=title_fs)
     
     plt.tight_layout()
-    
+    # print('Сохранение карты: '+OUTPUT_SUITABILITY_JPG)
     # Сохранение с высоким разрешением (длина ≥ 2000 px)
     plt.savefig(
         OUTPUT_SUITABILITY_JPG,

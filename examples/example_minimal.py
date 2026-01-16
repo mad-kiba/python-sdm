@@ -12,7 +12,9 @@ from sdm import PythonSDM
 # устанавливаем параметры для запуска модели
 config = {
         'IN_ID': 1,
+        #'IN_CSV': 'data/Corvus_Corvus_cornix.csv',
         'IN_CSV': 'data/falco_peregrinus.csv',
+        'IN_CSV_ADDITIONAL': '',
         #'IN_CSV': 'data/null.csv',
         'PREDICTORS': 'all', # используем все доступные предикторы
         'IN_MIN_LAT': 78.0,
@@ -28,7 +30,8 @@ config = {
         'BG_DISTANCE_MIN': 0, # указывается в шагах сетки, 0 = пытается вычислить автоматически исходя из систематики
         'BG_DISTANCE_MAX': 0, # указывается в шагах сетки
         #'DO_GISTO': 1, # нужно ли рисовать гистограммы
-        'DO_GISTO': 0, 
+        'DO_GISTO': 0,
+        'DO_SEASON': 1,
         'JOBS': {}
 }
 
@@ -42,10 +45,11 @@ sdm_instance.deduplicate_data()         # 5) дедупликация данны
 sdm_instance.generate_bg_pa()           # 6) генерация фотоновых точек и псевдоотсутствия
 sdm_instance.extract_features()         # 7) извлечение признаков
 sdm_instance.draw_gistos()              # 8) постройка гистограмм
-sdm_instance.split_train_test()         # 9)
-sdm_instance.train_model()              #10)
-sdm_instance.predict_current()          #11)
-sdm_instance.draw_map_current()         #12)
-sdm_instance.predict_future()           #13)
+sdm_instance.split_train_test()         # 9) разделение выборки на учебную и тестовую
+sdm_instance.train_model()              #10) обучение модели
+sdm_instance.predict_current()          #11) предсказание на текущем временном периоде
+sdm_instance.draw_map_current()         #12) отрисовка текущей карты
+sdm_instance.predict_future()           #13) предсказание на будущем временном периоде
+sdm_instance.predict_monthly()          #14) помесячная SDM
 
 
