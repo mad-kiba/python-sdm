@@ -14,6 +14,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import roc_auc_score
 from rasterio.transform import xy
+#import libpysal - нужно для расчётов Moran's I, сейчас не используется
+#import esda
 
 # Импорт функций из utils
 from .utils.preprocessing import clip_rasters, points_to_pixel_indices, pixel_indices_to_points
@@ -39,8 +41,8 @@ class PythonSDM:
         
         self.RANDOM_SEED = 42
         
-        self.OUTPUT_SUITABILITY_TIF = "output/suitability_"+str(self.IN_ID)+".tif"  # куда сохранить карту пригодности
-        self.OUTPUT_SUITABILITY_JPG = "output/suitability_"+str(self.IN_ID)+".jpg"
+        self.OUTPUT_SUITABILITY_TIF = "output/suitability/"+str(self.IN_ID)+"/suitability_"+str(self.IN_ID)+".tif"  # куда сохранить карту пригодности
+        self.OUTPUT_SUITABILITY_JPG = "output/suitability/"+str(self.IN_ID)+"/suitability_"+str(self.IN_ID)+".jpg"
         self.OUTPUT_HISTOGRAMS_DIR = "output/gistos"
         self.OUTPUT_PREDICTIONS_DIR = "output/predictions"
         self.OUTPUT_SEASONS_DIR = "output/seasons"
@@ -56,19 +58,26 @@ class PythonSDM:
                                 +str(self.IN_MIN_LON)+"), ("+str(self.IN_MAX_LAT)+","+str(self.IN_MAX_LON)+")"
         self.RASTER_DIR = self.OUTPUT_RASTER_DIR # папка с GeoTIFF-предикторами
         
+        if self.SCENARIOS == 'all':
+            self.SCENARIOS = 'SSP126_EC-Earth3-Veg,SSP245_EC-Earth3-Veg,SSP370_EC-Earth3-Veg,SSP585_EC-Earth3-Veg'
+        
         # Сколько фоновых точек генерировать: мин(10000, 10 * N_presence)
         self.MAX_BG = 10000
         
         # начали
         np.random.seed(self.RANDOM_SEED)
         
-        self.TEXT_FILENAME = 'output/texts/'+str(self.IN_ID)+'.txt'
-        self.PRED_FILENAME = 'output/texts/'+str(self.IN_ID)+'_pred.txt'
-        self.STACK_FILENAME = 'output/texts/'+str(self.IN_ID)+'_stack.txt'
-        self.MONTH_FILENAME = 'output/texts/'+str(self.IN_ID)+'_month.txt'
-        self.CSV_FILENAME = 'output/texts/'+str(self.IN_ID)+'.csv'
+        self.TEXT_FILENAME = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'.txt'
+        self.PRED_FILENAME = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_pred.txt'
+        self.STACK_FILENAME = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_stack.txt'
+        self.MONTH_FILENAME = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_month.txt'
+        self.CSV_FILENAME = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'.csv'
+        self.CSV_FILENAME_ADD = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_add.csv'
+        self.GISTO_STATS = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_gistos.js'
+        self.FUTURE_SUITS = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_futures.js'
         
-        os.makedirs('output/texts/', exist_ok=True)
+        os.makedirs('output/texts/'+str(self.IN_ID)+'/', exist_ok=True)
+        os.makedirs('output/suitability/'+str(self.IN_ID)+'/', exist_ok=True)
         
         # для запуска в многопоточном режиме
         j = self.JOBS.get(self.IN_ID)
@@ -87,20 +96,22 @@ class PythonSDM:
         # 2) Загрузка присутствий
         print(f"\n-- 2. Загрузка наблюдений ({self.IN_ID})")
         try:
-            ret = load_species_occurrence_data(self.IN_ID, self.IN_CSV, self.CSV_FILENAME, self.MONTH_FILENAME, self.TEXT_FILENAME,
+            ret = load_species_occurrence_data(self.IN_ID, self.IN_CSV, self.IN_CSV_ADDITIONAL, self.CSV_FILENAME, self.CSV_FILENAME_ADD,
+                                               self.MONTH_FILENAME, self.TEXT_FILENAME,
                                                self.IN_MIN_LON, self.IN_MIN_LAT, self.IN_MAX_LON, self.IN_MAX_LAT, self.JOBS)
         except Exception as e:
             # если не будут возвращаться тексты ошибок исключений, раскомментировать две строчки ниже:
-            #self.JOBS[self.IN_ID]['status'] = 'error'
-            #self.JOBS[self.IN_ID]['error'] = e
             print(e)
-            return {'status': 'terminated', 'error': e, 'code': 401}
+            return {'status': 'terminated', 'error': str(e), 'code': 401}
         
         self.LAT_COL = ret['LAT_COL']
         self.LON_COL = ret['LON_COL']
+        
         self.df = ret['df']
         self.occ = ret['occ']
+        
         self.source_occ = ret['occ']
+        self.species = ret['species']
     
     
     def load_predictors(self):
@@ -112,7 +123,7 @@ class PythonSDM:
             self.bands, self.H, self.W = self.stack.shape
         except Exception as e:
             print(e)
-            return {'status': 'terminated', 'error': e, 'code': 401}
+            return {'status': 'terminated', 'error': str(e), 'code': 401}
         
         print(f"\n-- Загружено предикторов: {self.bands} | Размер: {self.H} x {self.W} | CRS: {self.crs}")
         print("Слои:", self.band_names)
@@ -124,6 +135,7 @@ class PythonSDM:
     
     def prepare_data(self, month = 0):
         # 4) Привязка присутствий к пикселям растра и фильтрация по маске валидности
+        print(f"\n-- 4. Привязка присутствий к пикселям растра и фильтрация по маске валидности ({self.IN_ID})")
         if (month!=0):
             self.occ = self.source_occ.dropna()
             self.occ.loc[:, 'month'] = self.occ['month'].astype(int)
@@ -131,7 +143,6 @@ class PythonSDM:
         else:
             self.occ = self.source_occ
         
-        print(f"\n-- 4. Привязка присутствий к пикселям растра и фильтрация по маске валидности ({self.IN_ID})")
         rows, cols, inside = points_to_pixel_indices(self.occ[self.LON_COL].values, self.occ[self.LAT_COL].values,\
                                                      self.transform, self.W, self.H)
         # Фильтруем те, что внутри растра
@@ -148,9 +159,7 @@ class PythonSDM:
         
         if len(rows)<10 and month=='':
             print('Not enough points in region')
-            self.JOBS[self.IN_ID]['status'] = 'error'
-            self.JOBS[self.IN_ID]['error'] = f"Внутри области моделирования недостаточно точек. Должно быть не менее 10, сейчас: {len(rows)}."
-            return {"error": f"Внутри области моделирования недостаточно точек. Должно быть не менее 10, сейчас: {len(rows)}.", "status": "terminated"}, 401
+            return {'status': 'terminated', 'error': f"Внутри области моделирования недостаточно точек. Должно быть не менее 10, сейчас: {len(rows)}.", 'code': 401}
         
         # 4.1) создаём полные растры для всего спектра слоёв-предикторов
         print(f"-- 4.1. Создаём полные растры для всего спектра слоёв-предикторов ({self.IN_ID})")
@@ -186,9 +195,7 @@ class PythonSDM:
         
         if n_presence<5 and month==0:
             print('Not enough unique points in region')
-            self.JOBS[IN_ID]['status'] = 'error'
-            self.JOBS[IN_ID]['error'] = f"Внутри области моделирования очень мало уникальных присутствий. Должно быть не менее 5, сейчас: {n_presence}."
-            return {"error": f"Внутри области моделирования очень мало уникальных присутствий. Должно быть не менее 5, сейчас: {n_presence}.", "status": "terminated"}, 401
+            return {'status': 'terminated', 'error': f"Внутри области моделирования очень мало уникальных присутствий. Должно быть не менее 5, сейчас: {n_presence}.", 'code': 401}
         
         self.rows_coord, self.cols_coord, inside = pixel_indices_to_points(rows_p, cols_p, self.transform, self.W, self.H)
         
@@ -206,26 +213,34 @@ class PythonSDM:
         print(f"\n-- 6. Генерация фоновых точек и точек псевдоотсутствия ({self.IN_ID})")
         # 6.1) если нужно генерировать точки псевдоотсутствия, но параметры заданы на авто
         if self.BG_PC!=100 and self.BG_DISTANCE_MIN==0:
+            
+            temp_df = self.df.query("`kingdom`!='' and `class`!=''")
+            temp_df = temp_df.dropna(subset=['kingdom', 'class'])
+            dkingdom = temp_df['kingdom'].unique()
+            dclass =   temp_df['class'].unique()
+            
+            print(f"Вычислено царство {dkingdom} и класс {dclass}")
+            
             print("Нужно генерировать точки псевдоприсутствия, и параметры огибающих заданы на авто. Определяем их.")
-            if len(self.df['kingdom'].unique())==1 and len(self.df['class'].unique())<=1:
+            if len(dkingdom)==1 and len(dclass)<=1:
                 # значения по умолчанию
                 self.BG_DISTANCE_MIN = 10
                 self.BG_DISTANCE_MAX = 20
                 
                 # вычисляем параметры
-                if self.df['class'].unique()==['Aves']: # Птицы
+                if dclass==['Aves']: # Птицы
                     self.BG_DISTANCE_MIN = 50
                     self.BG_DISTANCE_MAX = 100
                     
-                if self.df['class'].unique()==['Mammalia']: # Млекопитающие
+                if dclass==['Mammalia']: # Млекопитающие
                     self.BG_DISTANCE_MIN = 20
                     self.BG_DISTANCE_MAX = 50
                     
-                if self.df['class'].unique()==['Amphibia']: # Амфибии
+                if dclass==['Amphibia']: # Амфибии
                     self.BG_DISTANCE_MIN = 20
                     self.BG_DISTANCE_MAX = 50
                     
-                if self.df['class'].unique()==['Squamata'] or self.df['class'].unique()==['Testudines']: # Рептилии
+                if dclass==['Squamata'] or dclass==['Testudines']: # Рептилии
                     self.BG_DISTANCE_MIN = 20
                     self.BG_DISTANCE_MAX = 50
             else:
@@ -271,7 +286,7 @@ class PythonSDM:
         print(f"Матрица признаков: {self.X.shape}, классы: {np.bincount(self.y)}")
         
         np.savetxt(self.STACK_FILENAME, self.X_orig, delimiter=";", fmt="%d")
-
+    
 
     def draw_gistos(self):
         # 8) постройка гистограмм
@@ -303,6 +318,8 @@ class PythonSDM:
                 bins_num = len(np.unique(self.X_pres))
                 print(f"Количество бинов было уменьшено до {bins_num}, так как оно превышало количество уникальных значений.")
             
+            gistos_info = {}
+            
             # --- Сохранение каждой гистограммы в отдельный файл ---
             # Пересоздаем фигуру и оси для сохранения, чтобы они были независимы от plt.show()
             # Это важно, чтобы сохранить чистые изображения без лишних элементов, добавленных plt.show()
@@ -323,16 +340,20 @@ class PythonSDM:
                 layer_data = ''
                 
                 title = ''
-                if (len(self.df['species'].unique())==1):
-                    title = 'Вид: '+self.df['species'].unique()[0]
+                if self.species!='':
+                    title = 'Вид: '+self.species
                 
                 if scale_params:
                     data_for_plot_original_scale = inverse_scale(scaled_data_for_plot, scale_params)
                     data_for_plot_original_scale_full = inverse_scale(scaled_data_for_plot_full, scale_params)
-                    create_beautiful_histogram(ax_single, data_for_plot_original_scale, band_name, bins_num, data_for_plot_original_scale_full, title)
+                    gist = create_beautiful_histogram(ax_single, data_for_plot_original_scale, band_name, bins_num,
+                                                      data_for_plot_original_scale_full, title)
                 else:
                     print(f"Предупреждение: Параметры масштабирования не найдены для '{band_name}'. Отображаются масштабированные значения.")
-                    create_beautiful_histogram(ax_single, scaled_data_for_plot, band_name, bins_num, scaled_data_for_plot_full, title)
+                    gist = create_beautiful_histogram(ax_single, scaled_data_for_plot, band_name, bins_num,
+                                                      scaled_data_for_plot_full, title)
+                
+                gistos_info[band_name] = gist
                 
                 # Создаем имя файла
                 # Заменяем недопустимые символы, если есть в band_name
@@ -345,6 +366,9 @@ class PythonSDM:
                 print(f"Сохранена гистограмма: {i} - {output_filename}")
                 plt.close(fig_single) # Закрываем фигуру, чтобы освободить память
             plt.close(fig)
+            
+            with open(self.GISTO_STATS, 'a') as f:
+                json.dump(gistos_info, f, ensure_ascii=False, indent=4)
             
             print(f"Все гистограммы сохранены в папку: '{self.OUTPUT_HISTOGRAMS_DIR}\{self.IN_ID}'")
             
@@ -413,19 +437,19 @@ class PythonSDM:
             
             self.model.fit(self.X_train, self.y_train)
         
-        
         y_prob = self.model.predict_proba(self.X_test)[:, 1]
         #print(model.predict_proba(X_test))
         
         self.auc = roc_auc_score(self.y_test, y_prob)
         print(f"ROC AUC (holdout): {self.auc:.3f}")
         
+        # Если это основной прогон - записываем auc
         if month==0:
             with open(self.TEXT_FILENAME, 'a') as f:
                 f.write(f"\n{self.auc:.3f}")
                 
-                if (len(self.df['species'].unique())==1):
-                    title = self.df['species'].unique()[0]
+                if self.species!='':
+                    title = self.species
                     f.write(f"\n{title}")
                 else:
                     f.write(f"\nне определён")
@@ -447,48 +471,34 @@ class PythonSDM:
     def predict_current(self, month = 0):
         # 11) Прогноз на всю область и сохранение карты пригодности
         print(f"\n-- 11. Прогноз на всю область и сохранение карты пригодности ({self.IN_ID})")
-        # Предсказываем только на валидных пикселях
-        valid_idx = np.flatnonzero(self.valid_mask.ravel())
-        flat = self.stack.reshape(self.bands, -1).T  # (H*W, bands)
-        
-        suitability_flat = np.full(self.H * self.W, np.nan, dtype="float32")
-    
-        # Чтобы не упереться в память, делаем батчами
-        batch = 500_000
-        for start in range(0, len(valid_idx), batch):
-            end = start + batch
-            sel = valid_idx[start:end]
-            X_pred = flat[sel]
-            pred = self.model.predict_proba(X_pred)[:, 1].astype("float32")
-            suitability_flat[sel] = pred
-            
-        suitability = suitability_flat.reshape(self.H, self.W)
+
+        self.suitability = predict_suitability_for_stack(self.model, self.stack, self.valid_mask, batch_size=500_000)
         
         if (month!=0):
-            self.OUTPUT_SUITABILITY_TIF = "output/suitability_"+str(self.IN_ID)+"_"+str(month)+".tif"
+            self.OUTPUT_SUITABILITY_TIF = "output/suitability/"+str(self.IN_ID)+"/suitability_"+str(self.IN_ID)+"_"+str(month)+".tif"
             self.OUTPUT_SUITABILITY_JPG = "output/seasons/"+str(self.IN_ID)+"/cur_"+str(month)+".jpg"
         else:
-            self.OUTPUT_SUITABILITY_TIF = "output/suitability_"+str(self.IN_ID)+".tif"
-            self.OUTPUT_SUITABILITY_TIF_ORIG = "output/suitability_"+str(self.IN_ID)+".tif"
-            self.OUTPUT_SUITABILITY_JPG = "output/suitability_"+str(self.IN_ID)+".jpg"
+            self.OUTPUT_SUITABILITY_TIF = "output/suitability/"+str(self.IN_ID)+"/suitability_"+str(self.IN_ID)+".tif"
+            self.OUTPUT_SUITABILITY_TIF_ORIG = "output/suitability/"+str(self.IN_ID)+"/suitability_"+str(self.IN_ID)+".tif"
+            self.OUTPUT_SUITABILITY_JPG = "output/suitability/"+str(self.IN_ID)+"/suitability_"+str(self.IN_ID)+".jpg"
         
-        save_geotiff(self.OUTPUT_SUITABILITY_TIF, suitability, self.profile)
+        save_geotiff(self.OUTPUT_SUITABILITY_TIF, self.suitability, self.profile)
         print(f"Карта пригодности сохранена: {self.OUTPUT_SUITABILITY_TIF}")
         
-        mask_high_suitability05 = suitability > 0.05
-        count_high_suitability05 = np.sum(mask_high_suitability05)
+        mask_high_suitability05 = self.suitability > 0.05
+        hi_sui05 = np.sum(mask_high_suitability05)
         
-        mask_high_suitability50 = suitability > 0.5
-        count_high_suitability50 = np.sum(mask_high_suitability50)
+        mask_high_suitability50 = self.suitability > 0.5
+        hi_sui50 = np.sum(mask_high_suitability50)
         
-        mask_high_suitability95 = suitability > 0.95
-        count_high_suitability95 = np.sum(mask_high_suitability95)
+        mask_high_suitability95 = self.suitability > 0.95
+        hi_sui95 = np.sum(mask_high_suitability95)
         
         if month==0:
             with open(self.TEXT_FILENAME, 'a') as f:
-                f.write(f"\nCHS05:{count_high_suitability05}")
-                f.write(f"\nCHS50:{count_high_suitability50}")
-                f.write(f"\nCHS95:{count_high_suitability95}")
+                f.write(f"\nCHS05:{hi_sui05}")
+                f.write(f"\nCHS50:{hi_sui50}")
+                f.write(f"\nCHS95:{hi_sui95}")
         
         # (Опционально) можно сохранить также использованные точки присутствия в пиксельных координатах
         # или вернуть их центры в географических координатах:
@@ -499,12 +509,31 @@ class PythonSDM:
         print("Сохранены использованные присутствия (уникальные по пикселю): used_presences_"+str(self.IN_ID)+".csv")
     
     
+    def calculate_moransi(self):
+        print("\nРасчёт коэффициента Moran's I: ")
+        #moran_results =  calculate_morans_i_for_suitability(self.suitability_flat, self.rows_p, self.cols_p,
+        #                                                    self.W, self.H, self.transform, self.crs)
+        
+        num_cells = self.suitability_flat.shape[0]
+        cell_coords = np.array([[r, c] for r in range(self.H) for c in range(self.W)])
+        
+        k = 5 # Количество ближайших соседей
+        W_knn = libpysal.weights.KNN.from_array(cell_coords, k=k)
+        moran = esda.Moran(self.suitability_flat, W_knn)
+        
+        print(f"Значение Moran's I: {moran.I}")
+        print(f"Ожидаемое значение E(I): {moran.EI}")
+        #print(f"Дисперсия Var(I): {moran.VI}")
+        print(f"Z-score: {moran.z_sim}") # Z-score на основе симуляций
+        print(f"P-value: {moran.p_sim}") # P-value на основе симуляций
+    
+    
     def draw_map_current(self, month = 0):
         # 12) дальше рисуем картинку
         print(f"\n-- 12. Рисуем карту ({self.IN_ID})")
         title = ''
-        if (len(self.df['species'].unique())==1):
-            title = 'Карта вероятности присутствия вида '+self.df['species'].unique()[0]+f" ({self.IN_ID})"
+        if self.species!='':
+            title = 'Карта вероятности присутствия вида '+self.species+f" ({self.IN_ID})"
         adtitle = f"\nМодель: {self.IN_MODEL}, шаг: {self.IN_RESOLUTION}, уник. точек: {self.n_presence}, ROC-AUC: {self.auc:.3f}";
         title = title + adtitle
         
@@ -534,114 +563,111 @@ class PythonSDM:
             
             os.makedirs(self.OUTPUT_FUTURE_DIR, exist_ok=True)
             
-            PREDICTORS_STD = self.PREDICTORS
+            if isinstance(self.PREDICTORS, str):
+                PREDICTORS_EXP = [p.strip() for p in self.PREDICTORS.split(',') if p.strip()]
             
-            # 13.1) Загружаем обучающий стек предикторов (1970-2000) и обучаем модель на уже подготовленных точках
-            stack_train, valid_mask_train, transform_train, crs_train, profile_train, band_names_train = \
-                load_environmental_predictors(self.RASTER_DIR, PREDICTORS_STD)
-            print('Предикторы для обучения модели будущего загружены')
-            
-            if isinstance(PREDICTORS_STD, str):
-                PREDICTORS_STD_EXP = [p.strip() for p in PREDICTORS_STD.split(',') if p.strip()]
-            
-            # Извлекаем признаки в обучающих точках
-            X_pres = extract_features_from_stack(stack_train, self.rows_p, self.cols_p)
-            X_bg   = extract_features_from_stack(stack_train, self.rows_bg, self.cols_bg)
-            
-            X = np.vstack([X_pres, X_bg])
-            y = np.hstack([np.ones(len(X_pres), dtype=int), np.zeros(len(X_bg), dtype=int)])
-            
-            self.model.fit(X, y)
-            
-            
-            # 13.2) Прогноз на всю область и сохранение карты пригодности по текущему периоду
-            # Чтобы не упереться в память, делаем батчами
-            suitability = predict_suitability_for_stack(self.model, stack_train, valid_mask_train, batch_size=500_000)
             
             OUTPUT_SUITABILITY_TIF = self.OUTPUT_FUTURE_DIR + "/1970-2000.tif"
-            save_geotiff(OUTPUT_SUITABILITY_TIF, suitability, self.profile)
+            save_geotiff(OUTPUT_SUITABILITY_TIF, self.suitability, self.profile)
             print(f"Карта пригодности сохранена: {OUTPUT_SUITABILITY_TIF}")
             
             title = ''
-            if (len(self.df['species'].unique())==1):
-                title = 'Карта вероятности присутствия вида '+self.df['species'].unique()[0]+\
+            if self.species!='':
+                title = 'Карта вероятности присутствия вида '+self.species+\
                         f" ({self.IN_ID})\nТекущий период (базовые климатические переменные)"
             OUTPUT_SUITABILITY_JPG = self.OUTPUT_FUTURE_DIR + "/1970-2000.jpg"
             draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title, self.rows_coord, self.cols_coord)
             print(f"Карта пригодности сохранена: {OUTPUT_SUITABILITY_JPG}")
             #os.remove(OUTPUT_SUITABILITY_TIF) # пока не удаляем tif для будущего
             
+            # области пригодности
+            mask_high_suitability05 = self.suitability > 0.05
+            hi_sui05 = np.sum(mask_high_suitability05)
+            
+            mask_high_suitability50 = self.suitability > 0.5
+            hi_sui50 = np.sum(mask_high_suitability50)
+            
+            mask_high_suitability95 = self.suitability > 0.95
+            hi_sui95 = np.sum(mask_high_suitability95)
+            try:
+                future_stats = {}
+                future_stats['1970-2000'] = []
+                future_stats['1970-2000'].append({'n05': hi_sui05, 'n50': hi_sui50, 'n95': hi_sui95})
+            except Exception as e:
+                print('Ошибка')
+                print(str(e))
             
             
-            
-            # 13.3) Прогноз для будущих периодов/сценариев
+            # 13.1) Прогноз для будущих периодов/сценариев
             future_imgs = {}
+            #print(self.SCENARIOS.split(','))
             for period in sorted(d for d in os.listdir(FUTURE_ROOT_DIR)
                                  if os.path.isdir(os.path.join(FUTURE_ROOT_DIR, d))):
                 period_dir = os.path.join(FUTURE_ROOT_DIR, period)
+                #print(period)
             
                 for scenario in sorted(d for d in os.listdir(period_dir)
                                        if os.path.isdir(os.path.join(period_dir, d))):
-                    scen_dir = os.path.join(period, scenario)
-                    print(f"\nПрогноз: {period} / {scenario}")
-                    
-                    # Загружаем будущие предикторы строго в порядке PREDICTORS_STD;
-                    # если load_raster_stack не гарантирует порядок, переупорядочим по именам
-                    stack_fut, valid_mask_fut, transform_fut, crs_fut, profile_fut, band_names_fut = \
-                        load_environmental_predictors(self.RASTER_DIR, PREDICTORS_STD, scen_dir)
-                    
-                    # Проверка и переупорядочивание при необходимости
-                    if set(band_names_fut) != set(PREDICTORS_STD_EXP):
-                        print(f"Пропуск {period}/{scenario}: набор слоёв не совпадает с обучающим.")
-                        continue
-                    #if list(band_names_fut) != list(PREDICTORS_STD_EXP):
-                    #    # Переупорядочим ось слоёв под порядок PREDICTORS_STD
-                    #    idx = [band_names_fut.index(b) for b in PREDICTORS_STD_EXP]
-                    #    stack_fut = stack_fut[idx, :, :]
-                    #    band_names_fut = [band_names_fut[i] for i in idx]
-                    
-                    # (Необязательно) Проверка совместимости CRS/разрешения
-                    if crs_fut != crs_train:
-                        print(f"Внимание: CRS отличается у {period}/{scenario} (train={crs_train}, fut={crs_fut}).")
-                    
-                    suitability_f = predict_suitability_for_stack(self.model, stack_fut, valid_mask_fut, batch_size=500_000)
-                    
-                    out_name = f"{period}-{scenario}.tif"
-                    out_path = os.path.join(self.OUTPUT_FUTURE_DIR, out_name)
-                    save_geotiff(out_path, suitability_f, profile_fut)
-                    print(f"Сохранено: {out_path}")
-                    
-                    mask_high_suitability05 = suitability_f > 0.05
-                    count_high_suitability05 = np.sum(mask_high_suitability05)
-                    
-                    mask_high_suitability50 = suitability_f > 0.5
-                    count_high_suitability50 = np.sum(mask_high_suitability50)
-                    
-                    mask_high_suitability95 = suitability_f > 0.95
-                    count_high_suitability95 = np.sum(mask_high_suitability95)
-                    
-                    out_name_img = f"{period}-{scenario}.{count_high_suitability05}.{count_high_suitability50}.{count_high_suitability95}.jpg"
-                    out_path_img = os.path.join(self.OUTPUT_FUTURE_DIR, out_name_img)
-                    print(f"Карта пригодности сохранена: {out_name_img}")
-                    
-                    # записываем в список прогнозов будущего
-                    if scenario not in future_imgs:
-                        future_imgs[scenario] = []
-                    future_imgs[scenario].append(out_path_img)
-                    if period=='2081-2100':
+                    #print(scenario)
+                    if scenario in self.SCENARIOS.split(','):
+                        scen_dir = os.path.join(period, scenario)
+                        print(f"\nПрогноз: {period} / {scenario}")
+                        
+                        # Загружаем будущие предикторы строго в порядке self.PREDICTORS;
+                        # если load_raster_stack не гарантирует порядок, переупорядочим по именам
+                        stack_fut, valid_mask_fut, transform_fut, crs_fut, profile_fut, band_names_fut = \
+                            load_environmental_predictors(self.RASTER_DIR, self.PREDICTORS, scen_dir)
+                        
+                        suitability_f = predict_suitability_for_stack(self.model, stack_fut, valid_mask_fut, batch_size=500_000)
+                        
+                        out_name = f"{period}-{scenario}.tif"
+                        out_path = os.path.join(self.OUTPUT_FUTURE_DIR, out_name)
+                        save_geotiff(out_path, suitability_f, profile_fut)
+                        print(f"Сохранено: {out_path}")
+                        
+                        mask_high_suitability05 = suitability_f > 0.05
+                        hi_sui05 = np.sum(mask_high_suitability05)
+                        
+                        mask_high_suitability50 = suitability_f > 0.5
+                        hi_sui50 = np.sum(mask_high_suitability50)
+                        
+                        mask_high_suitability95 = suitability_f > 0.95
+                        hi_sui95 = np.sum(mask_high_suitability95)
+                        
+                        out_name_img = f"{period}-{scenario}.{hi_sui05}.{hi_sui50}.{hi_sui95}.jpg"
+                        out_path_img = os.path.join(self.OUTPUT_FUTURE_DIR, out_name_img)
+                        print(f"Карта пригодности сохранена: {out_name_img}")
+                        
+                        # записываем в список прогнозов будущего
+                        if scenario not in future_imgs:
+                            future_imgs[scenario] = []
+                        
+                        if scenario not in future_stats:
+                            future_stats[scenario] = []
+                        
                         future_imgs[scenario].append(out_path_img)
-                    
-                    #print(out_path)
-                    #print(out_path_img)
-                    
-                    title = ''
-                    if (len(self.df['species'].unique())==1):
-                        title = 'Карта вероятности присутствия вида '+self.df['species'].unique()[0]+\
-                                f" ({self.IN_ID})\nПериод: "+period+" (сценарий "+scenario+")"
-                    
-                    draw_map(out_path, out_path_img, title, self.rows_coord, self.cols_coord)
-                    if scenario!='SSP245_EC-Earth3-Veg':
-                        os.remove(out_path) # пока не удаляем tif для будущего
+                        future_stats[scenario].append({'n05': hi_sui05, 'n50': hi_sui50, 'n95': hi_sui95})
+                        
+                        if period=='2081-2100': # дублируем последний слайд, чтобы была пауза в анимации
+                            future_imgs[scenario].append(out_path_img)
+                        
+                        #print(out_path)
+                        #print(out_path_img)
+                        
+                        title = ''
+                        if self.species!='':
+                            title = 'Карта вероятности присутствия вида '+self.species+\
+                                    f" ({self.IN_ID})\nПериод: "+period+" (сценарий "+scenario+")"
+                        
+                        draw_map(out_path, out_path_img, title, self.rows_coord, self.cols_coord)
+                        if scenario!='SSP245_EC-Earth3-Veg':
+                            os.remove(out_path) # пока не удаляем tif для будущего
+            
+            try:
+                with open(self.FUTURE_SUITS, 'a') as f:
+                    json.dump(future_stats, f, ensure_ascii=False, default=str)
+            except Exception as e:
+                print(str(e))
             
             print(f"\nСоздаём анимацию:")
             try:
@@ -699,7 +725,7 @@ class PythonSDM:
                     self.draw_map_current(month)
             except Exception as e:
                 print(e)
-                return {'status': 'terminated', 'error': e, 'code': 401}
+                return {'status': 'terminated', 'error': str(e), 'code': 401}
             
             
             # 14.1) Анимания сезонности

@@ -22,7 +22,7 @@ config = {
         'IN_MAX_LAT': 90.0,
         'IN_MAX_LON': 56.0,
         'IN_RESOLUTION': '30s',
-        'MODEL_FUTURE': 0, # 0 = не прогнозируем будущее
+        'MODEL_FUTURE': 1, # 0 = не прогнозируем будущее
         'IN_MODEL': 'XGBoost',
         #'IN_MODEL': 'MaxEnt',
         'BG_MULT': 20,
@@ -31,7 +31,8 @@ config = {
         'BG_DISTANCE_MAX': 0, # указывается в шагах сетки
         #'DO_GISTO': 1, # нужно ли рисовать гистограммы
         'DO_GISTO': 0,
-        'DO_SEASON': 1,
+        'DO_SEASON': 0,
+        'SCENARIOS': 'all',
         'JOBS': {}
 }
 
@@ -48,6 +49,7 @@ sdm_instance.draw_gistos()              # 8) постройка гистогра
 sdm_instance.split_train_test()         # 9) разделение выборки на учебную и тестовую
 sdm_instance.train_model()              #10) обучение модели
 sdm_instance.predict_current()          #11) предсказание на текущем временном периоде
+#sdm_instance.calculate_moransi()
 sdm_instance.draw_map_current()         #12) отрисовка текущей карты
 sdm_instance.predict_future()           #13) предсказание на будущем временном периоде
 sdm_instance.predict_monthly()          #14) помесячная SDM

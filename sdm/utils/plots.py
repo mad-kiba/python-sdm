@@ -9,8 +9,8 @@ from matplotlib.ticker import FuncFormatter, MaxNLocator
 from shapely.geometry import Point
 from PIL import Image
 
-from .utils import get_predictor_stats, format_float
-from .utils import read_and_to_3857
+from .utils import get_predictor_stats, format_float, calculate_histogram_similarity
+from .utils import read_and_to_3857, round_to_significant_figures
 
 
 def create_avi_from_images(image_paths, output_mp4_path='output.mp4', fps=1):
@@ -29,7 +29,7 @@ def create_avi_from_images(image_paths, output_mp4_path='output.mp4', fps=1):
     images = []
     for img_path in image_paths:
         # Проверяем существование файла
-        print(img_path)
+        #print(img_path)
         if not os.path.exists(img_path):
             print(f"Файл не найден: {img_path}")
             raise FileNotFoundError(f"Файл не найден: {img_path}")
@@ -75,8 +75,8 @@ def create_animated_gif(image_paths, output_path="animation.gif", duration=500):
         duration (int): Время отображения каждого кадра в миллисекундах.
                         (Например, 500ms = 0.5 секунды на кадр).
     """
-    print('Файлы в GIF:')
-    print(image_paths)
+    #print('Файлы в GIF:')
+    #print(image_paths)
     images = []
     for path in image_paths:
         try:
@@ -266,6 +266,8 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
     bio_info = {
         'roughness_std3x3': "Пересечённость рельефа (стандартное отклонение на сетке 3х3 км)",
         'slope_deg': "Уклон рельефа на заданном шаге модели",
+        'distance_to_cities': "Расстояние до городской застройки",
+        'distance_to_water': "Расстояние до водоёмов",
         'wc2.1_30s_elev': "WC ELEV: Высота над уровнем моря",
         'wc2.1_30s_bio_1': "WC BIO1: Среднегодовая температура (Mean annual temperature)",
         'wc2.1_30s_bio_2': "WC BIO2: Среднегодовая суточная температурная амплитуда (Mean diurnal range)",
@@ -409,9 +411,18 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
         'SG_wv1500_100-200cm_mean_1000': "SoilGrid: Объемная влажность при 1500 кПа на глубине 100-200 см, х10 %",
     }
     
+    try:
+        # --- Статистика и гистограмма для данных наблюдений (data) ---
+        stats_data = get_predictor_stats(data)
+        stats_predictor = get_predictor_stats(data_full)
+        stats_data['similarity'] = calculate_histogram_similarity(data, data_full, bins_num)
+    except Exception as e:
+        print('Ошибка вычисления стат показателей диаграм:')
+        print(e)
+        
     
-    # --- Статистика и гистограмма для данных наблюдений (data) ---
-    stats_data = get_predictor_stats(data)
+    
+    #print(band_name)
     
     # Определяем диапазон бинов.
     # Сначала убедимся, что data_full имеет хотя бы данные для расчета диапазона,
@@ -471,13 +482,15 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
     
     ax.bar(bin_edges_data[:-1], normalized_counts_data, width=bin_width_data, align='edge',
            color='skyblue', edgecolor='black', alpha=0.7, label='Частота наблюдений')
-
+    
     # --- Добавляем линии для основных статистик (для data) ---
     # Линии рисуем по исходным данным (data), а не по нормализованным counts.
+    #print(10)
     ax.axvline(stats_data['mean'], color='red', linestyle='dashed', linewidth=1.5, label=f'Среднее ({format_float(stats_data["mean"])})')
     ax.axvline(stats_data['median'], color='green', linestyle='dashed', linewidth=1.5, label=f'Медиана ({format_float(stats_data["median"])})')
     ax.axvline(stats_data['p5'], color='orange', linestyle='dotted', linewidth=1)
     ax.axvline(stats_data['p95'], color='orange', linestyle='dotted', linewidth=1, label='5%/95%')
+    #print(20)
     
     # --- Заголовок и подписи осей ---
     axtitle = f'Значения для предиктора: {band_name}'
@@ -496,7 +509,10 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
     
     # --- Добавляем информацию о статистике (для data) ---
     y_pos_for_stats_data_adjusted = 0.95
-    add_stats_to_plot(ax, stats_data, y_pos=y_pos_for_stats_data_adjusted, y_max_overall=total_y_max_normalized)
+    try:
+        add_stats_to_plot(ax, stats_data, stats_predictor, y_pos=y_pos_for_stats_data_adjusted, y_max_overall=total_y_max_normalized)
+    except Exception as e:
+        print("Ошибка нанесения статистических признаков: " + str(e))
     
     # --- Легенда ---
     handles, labels = ax.get_legend_handles_labels()
@@ -505,9 +521,11 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
     
     # --- Устанавливаем пределы оси Y ---
     ax.set_ylim(0, total_y_max_normalized * 1.4)
+    
+    return stats_data, stats_predictor
 
 
-def add_stats_to_plot(ax: plt.Axes, stats: dict, y_pos: float, y_max_overall: float = None):
+def add_stats_to_plot(ax: plt.Axes, stats: dict, stats_pred: dict, y_pos: float, y_max_overall: float = None):
     """
     Добавляет статистическую информацию на оси гистограммы.
     Учитывает y_max_overall для корректного позиционирования текста,
@@ -526,18 +544,46 @@ def add_stats_to_plot(ax: plt.Axes, stats: dict, y_pos: float, y_max_overall: fl
     """
 
     # Проверяем, что словарь stats содержит все ожидаемые ключи
-    required_keys = ['min', 'p5', 'median', 'mean', 'p95', 'max']
+    required_keys = ['min', 'p5', 'median', 'mean', 'p95', 'max', 'std_dev', 'skewness', 'kurtosis', 'similarity']
     for key in required_keys:
         if key not in stats:
             stats[key] = np.nan # Устанавливаем NaN, если ключ отсутствует
+            
+    try:
+        broad = round_to_significant_figures(stats.get('width_obs')/stats_pred.get('width_obs'), 2)
+    except Exception as e:
+        print("Ошибка вычисления относительной ширины: " + str(e))
+        broad = 0
+    
+    broad = round(broad, 2)
+    simil = round(stats.get('similarity'), 2)
 
     stats_text = (
+        f"  Наблюдения:\n"
         f"  Min: {format_float(stats.get('min'))}\n" # Используем .get() для безопасности
         f"  P5:  {format_float(stats.get('p5'))}\n"
         f"  Med: {format_float(stats.get('median'))}\n"
         f"  Mean:{format_float(stats.get('mean'))}\n"
         f"  P95: {format_float(stats.get('p95'))}\n"
-        f"  Max: {format_float(stats.get('max'))}"
+        f"  Max: {format_float(stats.get('max'))}\n"
+        f"  StDev: {format_float(stats.get('std_dev'))}\n"
+        f"  Ass: {format_float(stats.get('skewness'))}\n"
+        f"  Exc: {format_float(stats.get('kurtosis'))}\n\n"
+        
+        f"  Весь слой:\n"
+        f"  Min: {format_float(stats_pred.get('min'))}\n" # Используем .get() для безопасности
+        f"  P5:  {format_float(stats_pred.get('p5'))}\n"
+        f"  Med: {format_float(stats_pred.get('median'))}\n"
+        f"  Mean:{format_float(stats_pred.get('mean'))}\n"
+        f"  P95: {format_float(stats_pred.get('p95'))}\n"
+        f"  Max: {format_float(stats_pred.get('max'))}\n"
+        f"  StDev: {format_float(stats_pred.get('std_dev'))}\n"
+        f"  Ass: {format_float(stats_pred.get('skewness'))}\n"
+        f"  Exc: {format_float(stats_pred.get('kurtosis'))}\n\n"
+        
+        f"  Сравнение:\n"
+        f"  Broad: {broad}\n"
+        f"  Simil: {simil}"
     )
 
     # Помещаем текст справа от гистограммы.

@@ -22,7 +22,7 @@ def load_occurrences(df, lon_col, lat_col, month_col=''):
     return df
 
 
-def load_species_occurrence_data(IN_ID, IN_CSV, CSV_FILENAME, MONTH_FILENAME, TEXT_FILENAME,
+def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME, CSV_FILENAME_ADD, MONTH_FILENAME, TEXT_FILENAME,
                                 IN_MIN_LON, IN_MIN_LAT, IN_MAX_LON, IN_MAX_LAT, jobs):
     
     try:
@@ -40,15 +40,33 @@ def load_species_occurrence_data(IN_ID, IN_CSV, CSV_FILENAME, MONTH_FILENAME, TE
         raise ValueError('Ошибка чтения файла: ' + str(e))
     
     
-    with open(CSV_FILENAME, 'w') as f: # записываем в архив
+    with open(CSV_FILENAME, 'w') as f: # записываем файл
         f.write(IN_CSV)
+        
     
     df = pd.read_csv(CSV_FILENAME, sep="\t", index_col=False, on_bad_lines='skip', low_memory=False)
+    species = ''
     if (len(df['species'].unique())==1):
         species = df['species'].unique()[0]
         print(f"Определён вид: {species}")
     
     print(f"Всего загружено записей: {len(df)}")
+    
+    if IN_CSV_ADDITIONAL != '': # если есть дополнительные записи - добавим их
+        with open(CSV_FILENAME_ADD, 'w') as f: # записываем файл
+            f.write(IN_CSV_ADDITIONAL)
+            f.close()
+            
+        df2 = pd.read_csv(CSV_FILENAME_ADD, sep="\t", index_col=False, on_bad_lines='skip', low_memory=False, )
+        
+        columns_df = df.columns
+        columns_df2 = df2.columns
+        common_columns_in_both = list(set(columns_df) & set(columns_df2))
+        df2_filtered = df2[common_columns_in_both]
+        df = pd.concat([df, df2_filtered], ignore_index=True)
+        
+        print(f"Записей после дозагрузки: {len(df)}, из них дозагружено: {len(df2)}")
+            
     
     # вычисление полей с координатами
     LAT_COL = 'lat'
@@ -124,7 +142,7 @@ def load_species_occurrence_data(IN_ID, IN_CSV, CSV_FILENAME, MONTH_FILENAME, TE
         print('Less than 10 points')
         raise ValueError(f"Недостаточно точек. Должно быть не менее 10, сейчас: {len(occ)}.")
     
-    return {'LAT_COL': LAT_COL, 'LON_COL': LON_COL, 'df': df, 'occ': occ, 'status': 'done'}
+    return {'LAT_COL': LAT_COL, 'LON_COL': LON_COL, 'df': df, 'occ': occ, 'status': 'done', 'species': species}
 
 
 def load_environmental_predictors(raster_dir, predictors = 'all', period='current'):

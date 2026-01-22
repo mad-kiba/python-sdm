@@ -2,10 +2,13 @@ import numpy as np
 import rasterio
 import math
 import os
+import rasterio.transform
 from rasterio.crs import CRS
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from scipy.ndimage import distance_transform_edt
-
+from scipy.stats import skew, kurtosis, pearsonr, chisquare
+from scipy.spatial.distance import cosine
+import numpy as np
 
 # Вспомогательная функция предсказания по стеку батчами
 def predict_suitability_for_stack(model, stack, valid_mask, batch_size=500_000):
@@ -116,6 +119,85 @@ def round_to_significant_figures(number: float, sig_digits: int = 4) -> float:
     return round(number / multiplier) * multiplier
 
 
+def calculate_histogram_similarity(data_obs, data_full, bins_num=50, sig_figs=4):
+    """
+    Вычисляет показатель подобия двух гистограмм.
+    Возвращает значение от 0 до 1 (1 - максимальное сходство).
+    """
+    
+    # 1. Рассчитываем гистограммы
+    # Устанавливаем общий диапазон, чтобы бины были сопоставимы
+    # Можно взять min/max из data_full, или задать общий диапазон, если известно.
+    # Предположим, что data_full содержит полный диапазон значений.
+    min_val = np.min(data_full)
+    max_val = np.max(data_full)
+    
+    # Убеждаемся, что диапазон не нулевой
+    if min_val == max_val:
+        # Если все значения одинаковы, то гистограмма - это один пик.
+        # Сравнение будет тривиальным.
+        if np.all(data_obs == data_obs[0]) and np.all(data_full == data_full[0]):
+            return 1.0, 0.0, 0.0 # Полное сходство, корреляция 1, Чи-квадрат 0
+        else:
+            # Разные, но одномерные распределения
+            return 0.0, 0.0, 0.0 # Полное несходство, корреляция 0, Чи-квадрат большой
+            
+    # bins_range = (min_val, max_val)
+    # Если range задан, то numpy.histogram возвращает тот же диапазон бинов.
+    # Если range не задан, numpy.histogram сам определяет диапазон.
+    # Важно: для сравнения двух гистограмм, бины должны быть одинаковыми.
+    # Поэтому лучше использовать общий диапазон, который охватывает оба набора данных.
+    # Или, если range задан, но data_obs выходит за его пределы, эти значения будут игнорироваться.
+    # Лучше всего - взять min/max из data_full, если он действительно охватывает всё.
+    
+    # Используем одинаковые бины для обоих наборов данных
+    bins = np.linspace(min_val, max_val, bins_num + 1)
+
+    counts_obs, _ = np.histogram(data_obs, bins=bins)
+    counts_full, _ = np.histogram(data_full, bins=bins)
+
+    # 2. Нормализация гистограмм (преобразование в плотности вероятности)
+    # Сумма всех значений гистограммы должна стать равной 1.
+    # Ширина бина (bin_width) нужна для получения истинной плотности вероятности.
+    bin_width = (max_val - min_val) / bins_num
+    
+    # Нормализуем так, чтобы сумма плотностей была равна 1
+    density_obs = counts_obs / (np.sum(counts_obs) * bin_width) if np.sum(counts_obs) > 0 else np.zeros_like(counts_obs)
+    density_full = counts_full / (np.sum(counts_full) * bin_width) if np.sum(counts_full) > 0 else np.zeros_like(counts_full)
+
+    # На случай, если после нормализации остались очень малые значения (близкие к нулю),
+    # которые могут вызвать проблемы с некоторыми метриками.
+    # Можно использовать небольшое эпсилон, если это необходимо.
+    epsilon = 1e-10
+    density_obs = np.maximum(density_obs, epsilon)
+    density_full = np.maximum(density_full, epsilon)
+    
+    # 3. Вычисление метрик сходства
+
+    # А. Коэффициент корреляции Пирсона
+    # Он возвращает значение от -1 до 1. Для неотрицательных данных он будет от 0 до 1.
+    # 1 - идеальная линейная зависимость (прямая пропорциональность).
+    # 0 - отсутствие линейной зависимости.
+    try:
+        # Убираем все бины, где оба значения - epsilon (практически 0)
+        # Это поможет избежать ошибок, если одно распределение имеет больше нулевых бинов.
+        mask = (density_obs > epsilon) | (density_full > epsilon)
+        
+        if np.sum(mask) < 2: # Нужно минимум 2 точки для корреляции
+            correlation = 0.0
+        else:
+            corr_coeff, _ = pearsonr(density_obs[mask], density_full[mask])
+            # Результат pearsonr может быть NaN, если данные очень скудные
+            correlation = corr_coeff if not np.isnan(corr_coeff) else 0.0
+            
+    except Exception as e:
+        print(f"Ошибка при расчете корреляции Пирсона: {e}")
+        correlation = 0.0
+
+    
+    return round_to_significant_figures(correlation, sig_figs)
+
+
 def get_predictor_stats(data: np.ndarray) -> dict:
     """
     Вычисляет основные статистические показатели для набора данных.
@@ -127,8 +209,27 @@ def get_predictor_stats(data: np.ndarray) -> dict:
         'min': round_to_significant_figures(np.min(data), 4),
         'max': round_to_significant_figures(np.max(data), 4),
         'p5': round_to_significant_figures(np.percentile(data, 5), 4),
-        'p95': round_to_significant_figures(np.percentile(data, 95), 4)
+        'p95': round_to_significant_figures(np.percentile(data, 95), 4),
+        'width_obs': round_to_significant_figures(np.percentile(data, 90) - np.percentile(data, 10), 4),
+        'std_dev': 0,
+        'skewness': 0,
+        'kurtosis': 0,
     }
+    
+    try:
+        stats['std_dev'] = round_to_significant_figures(np.std(data), 4)  # Стандартное отклонение
+    except Exception as e:
+        print('Ошибка вычисления статистики std_dev: ' + str(e))
+    
+    try:
+        stats['skewness'] = round_to_significant_figures(skew(data), 4)  # Стандартное отклонение
+    except Exception as e:
+        print('Ошибка вычисления статистики skewness: ' + str(e))
+        
+    try:
+        stats['kurtosis'] = round_to_significant_figures(kurtosis(data), 4)  # Стандартное отклонение
+    except Exception as e:
+        print('Ошибка вычисления статистики kurtosis: ' + str(e))
     
     return stats
 
@@ -157,7 +258,6 @@ def inverse_scale(scaled_data, scale_params):
         return scaled_data * scale + mean
     else:
         return scaled_data
-
 
 
 def extract_features_from_stack(stack, rows, cols):
