@@ -30,8 +30,7 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
             with open(IN_CSV, 'r') as file: # читаем исходный файл
                 IN_CSV = file.read()
         else:
-            print('file not exists')
-            raise ValueError('Ошибка чтения файла. Проверьте, что файл существует.')
+            print('На вход пришёл набор csv')
         if IN_CSV == '':
             print('file is empty')
             raise ValueError('Входной файл пустой.')
@@ -39,16 +38,15 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
         print('file read error')
         raise ValueError('Ошибка чтения файла: ' + str(e))
     
-    
     with open(CSV_FILENAME, 'w') as f: # записываем файл
         f.write(IN_CSV)
         
-    
     df = pd.read_csv(CSV_FILENAME, sep="\t", index_col=False, on_bad_lines='skip', low_memory=False)
     species = ''
-    if (len(df['species'].unique())==1):
-        species = df['species'].unique()[0]
-        print(f"Определён вид: {species}")
+    if 'species' in df.columns:
+        if (len(df['species'].unique())==1):
+            species = df['species'].unique()[0]
+            print(f"Определён вид: {species}")
     
     print(f"Всего загружено записей: {len(df)}")
     
@@ -104,26 +102,28 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     # 2.2) группировка по месяцам
     print(f"-- 2.2. Группировка по месяцам ({IN_ID})")
     # здесь где-то перепутаны координаты!!!
-    df_coord_filtered = df[df['year']>2010]
-    df_coord_filtered = df_coord_filtered[df_coord_filtered[LAT_COL].astype(float)>IN_MIN_LON]
-    df_coord_filtered = df_coord_filtered[df_coord_filtered[LAT_COL]<IN_MAX_LON]
-    df_coord_filtered = df_coord_filtered[df_coord_filtered[LON_COL]>IN_MIN_LAT]
-    df_coord_filtered = df_coord_filtered[df_coord_filtered[LON_COL]<IN_MAX_LAT]
-    
-    month_col = ''
-    if 'month' in df_coord_filtered.columns:
-        # MONTH_FILENAME
-        MONTH_COL = 'month'
-        df_cleaned = df_coord_filtered.dropna(subset=['year', 'month'])
-        df_cleaned['year'] = df_cleaned['year'].astype(int)
-        df_cleaned['month'] = df_cleaned['month'].astype(int)
+    MONTH_COL = ''
+    if 'year' in df.columns:
+        df_coord_filtered = df[df['year']>2010]
+        df_coord_filtered = df_coord_filtered[df_coord_filtered[LAT_COL].astype(float)>IN_MIN_LON]
+        df_coord_filtered = df_coord_filtered[df_coord_filtered[LAT_COL]<IN_MAX_LON]
+        df_coord_filtered = df_coord_filtered[df_coord_filtered[LON_COL]>IN_MIN_LAT]
+        df_coord_filtered = df_coord_filtered[df_coord_filtered[LON_COL]<IN_MAX_LAT]
         
-        df_cleaned['year_month'] = df_cleaned['year'].astype(str) + '-' + df_cleaned['month'].astype(str).str.zfill(2)
-        
-        monthly_counts = df_cleaned.groupby('year_month').size()
-        counts_dict = monthly_counts.to_dict()
-        with open(MONTH_FILENAME, 'w', encoding='utf-8') as f:
-            json.dump(counts_dict, f, ensure_ascii=False, indent=4) # indent=4 для читаемости
+        month_col = ''
+        if 'month' in df_coord_filtered.columns:
+            # MONTH_FILENAME
+            MONTH_COL = 'month'
+            df_cleaned = df_coord_filtered.dropna(subset=['year', 'month'])
+            df_cleaned['year'] = df_cleaned['year'].astype(int)
+            df_cleaned['month'] = df_cleaned['month'].astype(int)
+            
+            df_cleaned['year_month'] = df_cleaned['year'].astype(str) + '-' + df_cleaned['month'].astype(str).str.zfill(2)
+            
+            monthly_counts = df_cleaned.groupby('year_month').size()
+            counts_dict = monthly_counts.to_dict()
+            with open(MONTH_FILENAME, 'w', encoding='utf-8') as f:
+                json.dump(counts_dict, f, ensure_ascii=False, indent=4) # indent=4 для читаемости
     
     # 2.3) финальные присустсвия
     print(f"-- 2.3. Финальные присутствия ({IN_ID})")

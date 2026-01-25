@@ -429,8 +429,11 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
     # если data пустая.
     if data.size > 0:
         # Если data есть, используем ее диапазон для всех гистограмм
-        counts_data, bin_edges_data = np.histogram(data, bins=bins_num)
-        bins_range = (bin_edges_data.min(), bin_edges_data.max())
+        #counts_data, bin_edges_data = np.histogram(data, bins=bins_num)
+        #bins_range = (bin_edges_data.min(), bin_edges_data.max())
+        counts_full_temp, bin_edges_full_temp = np.histogram(data_full, bins=bins_num)
+        counts_data, bin_edges_data = np.histogram(data_full, bins=bins_num)
+        bins_range = (bin_edges_full_temp.min(), bin_edges_full_temp.max())
     elif data_full.size > 0:
         # Если data пустая, но data_full есть, используем диапазон data_full
         counts_full_temp, bin_edges_full_temp = np.histogram(data_full, bins=bins_num)
@@ -440,6 +443,7 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
         # Можно вывести сообщение или просто выйти.
         ax.set_title("Нет данных для отображения")
         return
+    
     
     # --- Расчет counts и нормализация для data ---
     if data.size > 0:

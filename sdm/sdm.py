@@ -95,6 +95,7 @@ class PythonSDM:
     def load_occurences(self):
         # 2) Загрузка присутствий
         print(f"\n-- 2. Загрузка наблюдений ({self.IN_ID})")
+        
         try:
             ret = load_species_occurrence_data(self.IN_ID, self.IN_CSV, self.IN_CSV_ADDITIONAL, self.CSV_FILENAME, self.CSV_FILENAME_ADD,
                                                self.MONTH_FILENAME, self.TEXT_FILENAME,
@@ -214,10 +215,14 @@ class PythonSDM:
         # 6.1) если нужно генерировать точки псевдоотсутствия, но параметры заданы на авто
         if self.BG_PC!=100 and self.BG_DISTANCE_MIN==0:
             
-            temp_df = self.df.query("`kingdom`!='' and `class`!=''")
-            temp_df = temp_df.dropna(subset=['kingdom', 'class'])
-            dkingdom = temp_df['kingdom'].unique()
-            dclass =   temp_df['class'].unique()
+            dkingdom = ['']
+            dclass = ['']
+            
+            if 'kingdom' in self.df.columns and 'class' in self.df.columns:
+                temp_df = self.df.query("`kingdom`!='' and `class`!=''")
+                temp_df = temp_df.dropna(subset=['kingdom', 'class'])
+                dkingdom = temp_df['kingdom'].unique()
+                dclass =   temp_df['class'].unique()
             
             print(f"Вычислено царство {dkingdom} и класс {dclass}")
             
@@ -660,7 +665,7 @@ class PythonSDM:
                                     f" ({self.IN_ID})\nПериод: "+period+" (сценарий "+scenario+")"
                         
                         draw_map(out_path, out_path_img, title, self.rows_coord, self.cols_coord)
-                        if scenario!='SSP245_EC-Earth3-Veg':
+                        if scenario!='SSP370_EC-Earth3-Veg':
                             os.remove(out_path) # пока не удаляем tif для будущего
             
             try:
@@ -705,7 +710,7 @@ class PythonSDM:
     
     def predict_monthly(self):
         # 14) сезонный прогноз
-        if self.DO_SEASON == 1:
+        if self.DO_SEASON == 1 and 'month' in self.df.columns:
             print(f"\n-- 14. Приступаю к помесячному моделированию")
             self.monthly_imgs = []
             os.makedirs("output/seasons/"+str(self.IN_ID), exist_ok=True)
