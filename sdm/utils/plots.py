@@ -2,15 +2,23 @@ import cv2
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+import rasterio
+from rasterio.warp import reproject, Resampling, transform as rasterio_transform
 from rasterio.transform import array_bounds
 import contextily as ctx
 from pyproj import CRS, Transformer
 from matplotlib.ticker import FuncFormatter, MaxNLocator
 from shapely.geometry import Point
 from PIL import Image
+import geopandas as gpd
+from shapely.geometry import Polygon
+import warnings
+import osmnx as ox
 
 from .utils import get_predictor_stats, format_float, calculate_histogram_similarity
 from .utils import read_and_to_3857, round_to_significant_figures
+
+
 
 
 def create_avi_from_images(image_paths, output_mp4_path='output.mp4', fps=1):
@@ -110,7 +118,157 @@ def create_animated_gif(image_paths, output_path="animation.gif", duration=500):
         loop=0
     )
     print(f"Анимированный GIF сохранен как: {output_path}")
-    
+
+
+def plot_geotiff_with_osm(geotiff_path: str, output_path: str, mean: float, scale: float, band: str):
+    """
+    Строит график значений GeoTIFF, накладывая поверх него контекстную карту OSM.
+    График отрисовывается в проекции Web Mercator (EPSG:3857) для корректного
+    отображения OSM без искажений. Размер фигуры будет динамически подстроен
+    под соотношение сторон области данных, а оси будут показывать
+    географические координаты (градусы).
+
+    Args:
+        geotiff_path (str): Путь к входному файлу GeoTIFF.
+        output_path (str): Путь к выходному файлу изображения (например, 'output.png').
+        mean (float): Значение среднего для обратного преобразования шкалы.
+        scale (float): Значение масштаба (стандартного отклонения) для обратного преобразования шкалы.
+                       (Оригинальное значение = масштабированное значение * scale + mean)
+    """
+
+    print(f"Загрузка GeoTIFF: {geotiff_path}")
+    with rasterio.open(geotiff_path) as src:
+        # 1. Чтение и репроекция GeoTIFF данных в EPSG:3857 (Web Mercator)
+        # Это позволяет базовой карте OSM отображаться без искажений.
+        data_src = src.read(1)
+        data_src = data_src.astype(np.float64)
+        data_src[data_src == src.nodata] = np.nan
+        target_crs = 'EPSG:3857'
+        
+        if src.crs == target_crs:
+            reprojected_data = data_src
+            dst_transform = src.transform
+            width = src.width
+            height = src.height
+        else:
+            # Вычисляем параметры для репроекции в Web Mercator
+            out_transform, out_width, out_height = rasterio.warp.calculate_default_transform(
+                src.crs, target_crs, src.width, src.height, *src.bounds
+            )
+            reprojected_data = np.empty((out_height, out_width), dtype=src.dtypes[0])
+            reproject(
+                source=data_src,
+                destination=reprojected_data,
+                src_transform=src.transform,
+                src_crs=src.crs,
+                dst_transform=out_transform,
+                dst_crs=target_crs,
+                resampling=Resampling.nearest # Можно использовать bilinear, cubic и т.д.
+            )
+            dst_transform = out_transform
+            width = out_width
+            height = out_height
+        # Вычисляем границы для imshow после репроекции (они теперь будут в метрах EPSG:3857)
+        left_m, bottom_m, right_m, top_m = rasterio.transform.array_bounds(height, width, dst_transform)
+        extent_m = [left_m, right_m, bottom_m, top_m]
+
+        # 2. Динамический расчет figsize и dpi на основе границ в метрах Web Mercator
+        # Эта логика взята из вашего примера.
+        width_v_meters = right_m - left_m
+        height_v_meters = top_m - bottom_m
+        
+        # Защита от деления на ноль, если область данных очень узкая или плоская
+        if height_v_meters == 0: 
+            height_v_meters = 1.0 # Присваиваем небольшое значение
+        if width_v_meters == 0:
+            width_v_meters = 1.0
+
+        # Соотношение сторон области данных в метрах Web Mercator
+        ratio = width_v_meters / height_v_meters  
+        
+        # Длинная сторона в дюймах и целевой размер по длинной стороне (минимум 2000 пикселей)
+        long_inches = 10.0 # Базовый размер для длинной стороны фигуры
+        desired_long_px = 2000 # Целевое разрешение по длинной стороне в пикселях
+        dpi = int(desired_long_px / long_inches) # Рассчитываем DPI
+        
+        if ratio >= 1.0:
+            # Горизонтальная область данных: фиксируем ширину фигуры
+            fig_w = long_inches
+            fig_h = max(long_inches / ratio, 1e-3) # Не допускаем нулевой высоты
+        else:
+            # Вертикальная область данных: фиксируем высоту фигуры
+            fig_h = long_inches
+            fig_w = max(long_inches * ratio, 1e-3) # Не допускаем нулевой ширины
+        
+        print(f"Динамически рассчитанные figsize: ({fig_w:.2f}, {fig_h:.2f}), dpi: {dpi}")
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
+
+        # Устанавливаем лимиты осей в метрах (Web Mercator)
+        ax.set_xlim(left_m, right_m)
+        ax.set_ylim(bottom_m, top_m)
+
+        # 3. Настройка пропорциональности карты для Web Mercator (EPSG:3857)
+        # В проекции Web Mercator, для неискаженного отображения, достаточно 'equal'.
+        # Поскольку figsize уже соответствует аспекту данных, 'adjustable' можно и не указывать,
+        # но для большей надёжности оставим.
+        print(f"Установка аспекта 'equal' для EPSG:3857.")
+        ax.set_aspect('equal', adjustable='box')
+
+        # 4. Наложение базовой карты OSM с помощью contextily
+        print("Загрузка контекстной карты OSM (contextily)...")
+        try:
+            ctx.add_basemap(ax, crs=target_crs, source=ctx.providers.OpenStreetMap.Mapnik, attribution=False)
+            print("Контекстная карта OSM добавлена без искажений.")
+        except Exception as e:
+            print(f"Не удалось добавить контекстную карту OSM: {e}. Продолжаем без карты.")
+
+        # Отображение GeoTIFF данных
+        im = ax.imshow(reprojected_data, cmap='bone', extent=extent_m, origin='upper', aspect='auto', alpha=0.7, zorder=1)
+        
+        # 5. Настройка шкалы значений
+        cbar = plt.colorbar(im, ax=ax, orientation='vertical', shrink=0.7)
+        
+        ticks = cbar.get_ticks()
+        cbar.set_ticks(ticks) 
+        original_values_ticks = ticks * scale + mean
+        cbar.set_ticklabels([f'{val:.2f}' for val in original_values_ticks])
+        
+        cbar.set_label(f'Значение слоя (оригинальные единицы, mean={mean:.2f}, scale={scale:.2f})')
+
+        # 6. Преобразование меток осей из EPSG:3857 (метры) в EPSG:4326 (градусы)
+        transformer = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True) 
+
+        # X-ось (долгота)
+        xticks = ax.get_xticks()
+        valid_xticks = [t for t in xticks if ax.get_xlim()[0] <= t <= ax.get_xlim()[1]]
+        
+        # Для преобразования долготы, широта не влияет, но pyproj требует оба аргумента.
+        # Используем центральную широту области в метрах Web Mercator.
+        center_y_m = (top_m + bottom_m) / 2
+        lon_labels, _ = transformer.transform(valid_xticks, [center_y_m] * len(valid_xticks)) 
+        ax.set_xticklabels([f'{lon:.2f}°' for lon in lon_labels])
+
+        # Y-ось (широта)
+        yticks = ax.get_yticks()
+        valid_yticks = [t for t in yticks if ax.get_ylim()[0] <= t <= ax.get_ylim()[1]]
+
+        # Для преобразования широты, долгота не влияет.
+        center_x_m = (left_m + right_m) / 2
+        _, lat_labels = transformer.transform([center_x_m] * len(valid_yticks), valid_yticks) 
+        ax.set_yticklabels([f'{lat:.2f}°' for lat in lat_labels])
+        
+        # Заголовки осей
+        ax.set_xlabel('Долгота (°)')
+        ax.set_ylabel('Широта (°)')
+        ax.set_title(band)
+        ax.grid(True, linestyle='--', alpha=0.6)
+
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=300) # quality=90 - не найден такой параметр
+        plt.close(fig)
+        print(f"График успешно сохранен в {output_path}")
+
+        
 
 def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title = '', rows=[], cols=[], map_only=0):
     data, transform, width, height = read_and_to_3857(OUTPUT_SUITABILITY_TIF)

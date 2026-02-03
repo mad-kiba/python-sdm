@@ -5,6 +5,8 @@ import json
 import glob
 import rasterio
 
+from .plots import plot_geotiff_with_osm
+
 def load_occurrences(df, lon_col, lat_col, month_col=''): 
     """Загружает CSV с наблюдениями, фильтрует некорректные координаты."""
     df.loc[:, lat_col] = df[lat_col].astype(float)
@@ -145,7 +147,7 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     return {'LAT_COL': LAT_COL, 'LON_COL': LON_COL, 'df': df, 'occ': occ, 'status': 'done', 'species': species}
 
 
-def load_environmental_predictors(raster_dir, predictors = 'all', period='current'):
+def load_environmental_predictors(raster_dir, predictors = 'all', period='current', scales=''):
     """Считывает все GeoTIFF из папки и строит стек (bands, H, W).
        Возвращает: stack(float32), valid_mask(bool), transform, crs, profile, band_names(list)"""
     
@@ -214,9 +216,23 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
     
     band_arrays = []
     band_names = []
+    band_paths = []
     ref_transform = None
     ref_width = ref_height = None
     ref_crs = None
+    
+    # создаём jpg для каждого слоя
+    if scales:
+        for i, fp in enumerate(tifs):
+            fpjpg = fp.replace('.tif', '.jpg')
+            band_paths.append(fpjpg)
+            
+            if not os.path.exists(fpjpg):
+                band = os.path.splitext(os.path.basename(fp))[0]
+                mean = scales[band]['mean']
+                sc = scales[band]['scale']
+                plot_geotiff_with_osm(fp, fpjpg, mean, sc, band)
+            
     
     for i, fp in enumerate(tifs):
         with rasterio.open(fp) as ds:
@@ -249,6 +265,6 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
         "compress": "lzw",
         "nodata": np.nan
     }
-    return stack, valid_mask, ref_transform, ref_crs, profile, band_names
+    return stack, valid_mask, ref_transform, ref_crs, profile, band_names, band_paths
 
 

@@ -10,6 +10,7 @@ import xgboost as xgb
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from pathlib import Path
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import roc_auc_score
@@ -51,6 +52,7 @@ class PythonSDM:
         self.OUTPUT_SEASONS_DIR = os.path.join(self.OUTPUT_SEASONS_DIR, str(self.IN_ID))
         
         self.RAW_RASTER_DIR = "input_predictors"
+        self.PREDICTORS_JPEGS = "output/predictors_jpegs"
         
         self.SCALES_FILE = os.path.join(self.RAW_RASTER_DIR, 'predictors_scales.json')
         
@@ -119,8 +121,10 @@ class PythonSDM:
         # 3) Загрузка стека предикторов
         print(f"\n-- 3. Загрузка предикторов ({self.IN_ID})")
         try:
-            self.stack, self.valid_mask, self.transform, self.crs, self.profile, self.band_names = \
-                load_environmental_predictors(self.RASTER_DIR, self.PREDICTORS)
+            with open(self.SCALES_FILE, 'r') as f:
+                scales_config = json.load(f)
+            self.stack, self.valid_mask, self.transform, self.crs, self.profile, self.band_names, self.band_paths = \
+                load_environmental_predictors(self.RASTER_DIR, self.PREDICTORS, scales = scales_config)
             self.bands, self.H, self.W = self.stack.shape
         except Exception as e:
             print(e)
@@ -132,6 +136,15 @@ class PythonSDM:
         with open(self.TEXT_FILENAME, 'a') as f:
             f.write(f"\n{self.bands} | Размер: {self.H} x {self.W} | CRS: {self.crs}")
             f.write(f"\n{self.band_names}")
+        
+        try:
+            basepath = 'output_predictors/'
+            with zipfile.ZipFile(self.PREDICTORS_JPEGS+"/"+str(self.IN_ID)+".zip", "w", compression=zipfile.ZIP_DEFLATED) as z:
+                for p in map(Path, self.band_paths):
+                    z.write(p, arcname=p.relative_to(basepath))  # все файлы в корне архива
+        except Exception as e:
+            print(e)
+        print("Проекции предикторов сохранены в архив")
     
     
     def prepare_data(self, month = 0):
@@ -620,7 +633,7 @@ class PythonSDM:
                         
                         # Загружаем будущие предикторы строго в порядке self.PREDICTORS;
                         # если load_raster_stack не гарантирует порядок, переупорядочим по именам
-                        stack_fut, valid_mask_fut, transform_fut, crs_fut, profile_fut, band_names_fut = \
+                        stack_fut, valid_mask_fut, transform_fut, crs_fut, profile_fut, band_names_fut, band_paths = \
                             load_environmental_predictors(self.RASTER_DIR, self.PREDICTORS, scen_dir)
                         
                         suitability_f = predict_suitability_for_stack(self.model, stack_fut, valid_mask_fut, batch_size=500_000)
