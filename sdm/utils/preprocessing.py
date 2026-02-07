@@ -98,6 +98,36 @@ def process_single_geotiff(input_filepath: str, output_dir: str, target_crs: str
                     resampling=ResamplingEnum.bilinear, # Используем билинейную для изменения разрешения
                     bounds=target_bounds_for_crop # Указываем границы, по которым нужно обрезать
                 )
+                
+            
+            # 3. Проверяем, есть ли маска валидности в исходном файле
+            #masked_data = src.read(1, masked=True)
+            #if masked_data.mask.any():
+            #    print("  Репроецирование маски валидности...")
+            
+                # 3.1. Читаем маску валидности из исходного файла
+            #    mask_source = src.read_masks(1) # Для первого слоя
+        
+                # 3.2. Репроецируем маску валидности
+            #    mask_destination = np.empty((final_height, final_width), dtype=mask_source.dtype)
+        
+            #    reproject(
+            #        source=mask_source,
+            #        destination=mask_destination,
+            #        src_transform=src.transform,
+            #        src_crs=src_crs,
+            #        dst_transform=final_dst.transform,
+            #        dst_crs=final_dst.crs,
+            #        resampling=ResamplingEnum.nearest, # Используем nearest для масок
+            #        bounds=target_bounds_for_crop
+            #    )
+        
+                # 3.3. Записываем репроецированную маску в выходной файл
+            #    final_dst.write_mask(mask_destination)
+            #    print("  Маска валидности успешно репроецирована и сохранена.")
+            #else:
+            #    print("  Исходный файл не содержит маски валидности.")
+
             
             print(f"  Сохранен файл: {final_output_filepath}")
             # Читаем сохраненный файл, чтобы вывести его точные параметры
@@ -189,7 +219,6 @@ def clip_rasters(RAW_RASTER_DIR, OUTPUT_RASTER_DIR, IN_MIN_LAT, IN_MIN_LON, IN_M
     print(f"Результаты сохранены в папку: '{OUTPUT_RASTER_DIR}'")
 
 
-
 def points_to_pixel_indices(lons, lats, transform, width, height):
     """Преобразует координаты (lon, lat) в индексы пикселей (row, col).
        Возвращает row, col и маску тех, кто внутри границ растра."""
@@ -200,7 +229,6 @@ def points_to_pixel_indices(lons, lats, transform, width, height):
     cols = np.floor(cols).astype(int)
     inside = (rows >= 0) & (rows < height) & (cols >= 0) & (cols < width)
     return rows, cols, inside
-
 
 
 def pixel_indices_to_points(rows, cols, transform, width, height):

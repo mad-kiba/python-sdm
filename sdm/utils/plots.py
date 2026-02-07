@@ -16,7 +16,7 @@ import warnings
 import osmnx as ox
 
 from .utils import get_predictor_stats, format_float, calculate_histogram_similarity
-from .utils import read_and_to_3857, round_to_significant_figures
+from .utils import read_and_to_3857, round_to_significant_figures, wrap_long_lines
 
 
 
@@ -120,7 +120,7 @@ def create_animated_gif(image_paths, output_path="animation.gif", duration=500):
     print(f"Анимированный GIF сохранен как: {output_path}")
 
 
-def plot_geotiff_with_osm(geotiff_path: str, output_path: str, mean: float, scale: float, band: str):
+def plot_geotiff_with_osm(geotiff_path: str, output_path: str, mean: float, scale: float, band: str, bio_info):
     """
     Строит график значений GeoTIFF, накладывая поверх него контекстную карту OSM.
     График отрисовывается в проекции Web Mercator (EPSG:3857) для корректного
@@ -245,7 +245,8 @@ def plot_geotiff_with_osm(geotiff_path: str, output_path: str, mean: float, scal
         # Для преобразования долготы, широта не влияет, но pyproj требует оба аргумента.
         # Используем центральную широту области в метрах Web Mercator.
         center_y_m = (top_m + bottom_m) / 2
-        lon_labels, _ = transformer.transform(valid_xticks, [center_y_m] * len(valid_xticks)) 
+        lon_labels, _ = transformer.transform(valid_xticks, [center_y_m] * len(valid_xticks))
+        ax.set_xticks(valid_xticks) 
         ax.set_xticklabels([f'{lon:.2f}°' for lon in lon_labels])
 
         # Y-ось (широта)
@@ -254,21 +255,24 @@ def plot_geotiff_with_osm(geotiff_path: str, output_path: str, mean: float, scal
 
         # Для преобразования широты, долгота не влияет.
         center_x_m = (left_m + right_m) / 2
-        _, lat_labels = transformer.transform([center_x_m] * len(valid_yticks), valid_yticks) 
+        _, lat_labels = transformer.transform([center_x_m] * len(valid_yticks), valid_yticks)
+        ax.set_yticks(valid_yticks) 
         ax.set_yticklabels([f'{lat:.2f}°' for lat in lat_labels])
         
         # Заголовки осей
         ax.set_xlabel('Долгота (°)')
         ax.set_ylabel('Широта (°)')
-        ax.set_title(band)
+        pred_title = band
+        if bio_info:
+            pred_title = bio_info.get(band)['title']
+        ax.set_title(pred_title, fontsize=8)
         ax.grid(True, linestyle='--', alpha=0.6)
 
         plt.tight_layout()
-        plt.savefig(output_path, dpi=300) # quality=90 - не найден такой параметр
+        plt.savefig(output_path, dpi=200) # quality=90 - не найден такой параметр
         plt.close(fig)
         print(f"График успешно сохранен в {output_path}")
 
-        
 
 def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title = '', rows=[], cols=[], map_only=0):
     data, transform, width, height = read_and_to_3857(OUTPUT_SUITABILITY_TIF)
@@ -416,158 +420,13 @@ def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title = '', rows=[]
     plt.close(fig)
     
     
-def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, bins_num: int, data_full: np.ndarray, title = ''):
+def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, bins_num: int, data_full: np.ndarray, bio_info, title = ''):
     """
     Рисует красивую и информативную гистограмму на заданных осях.
     """
     
-    bio_info = {
-        'roughness_std3x3': "Пересечённость рельефа (стандартное отклонение на сетке 3х3 км)",
-        'slope_deg': "Уклон рельефа на заданном шаге модели",
-        'distance_to_cities': "Расстояние до городской застройки",
-        'distance_to_water': "Расстояние до водоёмов",
-        'wc2.1_30s_elev': "WC ELEV: Высота над уровнем моря",
-        'wc2.1_30s_bio_1': "WC BIO1: Среднегодовая температура (Mean annual temperature)",
-        'wc2.1_30s_bio_2': "WC BIO2: Среднегодовая суточная температурная амплитуда (Mean diurnal range)",
-        'wc2.1_30s_bio_3': "WC BIO3: Изотермичность/сезонность температуры (Temperature seasonality, 100 * BIO2 / BIO7)",
-        'wc2.1_30s_bio_4': "WC BIO4: Сезонность температуры (Temperature seasonality, стандартное отклонение * 100)", # BIO4 тоже про сезонность, но другой расчет
-        'wc2.1_30s_bio_5': "WC BIO5: Средняя максимальная температура самого теплого месяца (Max temperature of warmest month)",
-        'wc2.1_30s_bio_6': "WC BIO6: Средняя минимальная температура самого холодного месяца (Min temperature of coldest month)",
-        'wc2.1_30s_bio_7': "WC BIO7: Годовая температурная амплитуда (Annual temperature range, BIO5 - BIO6)",
-        'wc2.1_30s_bio_8': "WC BIO8: Средняя температура самого влажного квартала (Mean temperature of wettest quarter)",
-        'wc2.1_30s_bio_9': "WC BIO9: Средняя температура самого сухого квартала (Mean temperature of driest quarter)",
-        'wc2.1_30s_bio_10': "WC BIO10: Средняя температура самого теплого квартала (Mean temperature of warmest quarter)",
-        'wc2.1_30s_bio_11': "WC BIO11: Средняя температура самого холодного квартала (Mean temperature of coldest quarter)",
-        'wc2.1_30s_bio_12': "WC BIO12: Годовое количество осадков (Annual precipitation)",
-        'wc2.1_30s_bio_13': "WC BIO13: Количество осадков самого влажного месяца (Precipitation of wettest month)",
-        'wc2.1_30s_bio_14': "WC BIO14: Количество осадков самого сухого месяца (Precipitation of driest month)",
-        'wc2.1_30s_bio_15': "WC BIO15: Сезонность осадков (Precipitation seasonality)",
-        'wc2.1_30s_bio_16': "WC BIO16: Количество осадков самого влажного квартала (Precipitation of wettest quarter)",
-        'wc2.1_30s_bio_17': "WC BIO17: Количество осадков самого сухого квартала (Precipitation of driest quarter)",
-        'wc2.1_30s_bio_18': "WC BIO18: Количество осадков самого теплого квартала (Precipitation of warmest quarter)",
-        'wc2.1_30s_bio_19': "WC BIO19: Количество осадков самого холодного квартала (Precipitation of coldest quarter)",
-        'Consensus_reduced_class_1': "EE CLC1: Вечнозелёные/Листопадные хвойные деревья (Evergreen/Deciduous Needleleaf Trees)",
-        'Consensus_reduced_class_2': "EE CLC2: Вечнозелёные широколистные деревья (Evergreen Broadleaf Trees)",
-        'Consensus_reduced_class_3': "EE CLC3: Листопадные широколистные деревья (Deciduous Broadleaf Trees)",
-        'Consensus_reduced_class_4': "EE CLC4: Смешанные/Другие деревья (Mixed/Other Trees)",
-        'Consensus_reduced_class_5': "EE CLC5: Кустарники (Shrubs)",
-        'Consensus_reduced_class_6': "EE CLC6: Травянистая растительность (Herbaceous Vegetation)",
-        'Consensus_reduced_class_7': "EE CLC7: Культивируемая и управляемая растительность (Cultivated and Managed Vegetation)",
-        'Consensus_reduced_class_8': "EE CLC8: Регулярно затопляемая растительность (Regularly Flooded Vegetation)",
-        'Consensus_reduced_class_9': "EE CLC9: Городская/Застроенная территория (Urban/Built-up)",
-        'Consensus_reduced_class_10': "EE CLC10: Снег/Лёд (Snow/Ice)",
-        'Consensus_reduced_class_11': "EE CLC11: Голые земли / Бесплодные земли (Barren)",
-        'Consensus_reduced_class_12': "EE CLC12: Открытые водные пространства (Open Water)",
-        'ENVIREM_thermicityIndex': "ENVIREM: Компенсированный индекс термичности",
-        'ENVIREM_monthCountByTemp10': "ENVIREM: Количество месяцев со средней температурой выше 10 гр.",
-        'ENVIREM_minTempWarmest': "ENVIREM: Минимальная температура самого теплого месяца, x10",
-        'ENVIREM_maxTempColdest': "ENVIREM: Максимальная температура самого холодного месяца, x10",
-        'ENVIREM_growingDegDays5': "ENVIREM: Сумма средних месячных температур для месяцев со средней температурой выше 5℃, умноженная на количество дней",
-        'ENVIREM_growingDegDays0': "ENVIREM: Сумма средних месячных температур для месяцев со средней температурой выше 0℃, умноженная на количество дней",
-        'ENVIREM_embergerQ': "ENVIREM: Эмбержеровский плювиотермический коэффициент",
-        'ENVIREM_continentality': "ENVIREM: Континентальность (средняя температура самого теплого месяца минус средняя температура самого холодного месяца)",
-        'ENVIREM_climaticMoistureIndex': "ENVIREM: Климатический индекс влажности (показатель относительной влажности и сухости)",
-        'ENVIREM_aridityIndexThornthwaite': "ENVIREM: Индекс аридности Торнтвейта (индекс степени водного дефицита)",
-        'ENVIREM_PETWettestQuarter': "ENVIREM: Среднемесячная потенциальная эвапотранспирация самого влажного квартала",
-        'ENVIREM_PETWarmestQuarter': "ENVIREM: Среднемесячная потенциальная эвапотранспирация самого теплого квартала",
-        'ENVIREM_PETseasonality': "ENVIREM: Сезонность потенциальной эвапотранспирации",
-        'ENVIREM_annualPET': "ENVIREM: Годовая потенциальная эвапотранспирация",
-        'ENVIREM_PETDriestQuarter': "ENVIREM: Среднемесячная потенциальная эвапотранспирация самого сухого квартала",
-        'ENVIREM_PETColdestQuarter': "ENVIREM: Среднемесячная потенциальная эвапотранспирация холодного квартала",
-        
-        'SG_ocs_0-30cm_mean_1000': "SoilGrid: Запас органического углерода в почве на глубине 0-30 см, х10 кг/кв. м",
-
-		'SG_bdod_0-5cm_mean_1000': "SoilGrid: Плотность грунта на глубине 0-5 см, х100 кг/л",
-		'SG_bdod_5-15cm_mean_1000': "SoilGrid: Плотность грунта на глубине 5-15 см, х100 кг/л",
-		'SG_bdod_15-30cm_mean_1000': "SoilGrid: Плотность грунта на глубине 15-30 см, х100 кг/л",
-		'SG_bdod_30-60cm_mean_1000': "SoilGrid: Плотность грунта на глубине 30-60 см, х100 кг/л",
-		'SG_bdod_60-100cm_mean_1000': "SoilGrid: Плотность грунта на глубине 60-100 см, х100 кг/л",
-		'SG_bdod_100-200cm_mean_1000': "SoilGrid: Плотность грунта на глубине 100-200 см, х100 кг/л",
-		
-		'SG_cec_0-5cm_mean_1000': "SoilGrid: Ёмкость катионного обмена почвы (ph=7) на глубине 0-5 см, х10 смоль/кг",
-		'SG_cec_5-15cm_mean_1000': "SoilGrid: Ёмкость катионного обмена почвы (ph=7) на глубине 5-15 см, х10 смоль/кг",
-		'SG_cec_15-30cm_mean_1000': "SoilGrid: Ёмкость катионного обмена почвы (ph=7) на глубине 15-30 см, х10 смоль/кг",
-		'SG_cec_30-60cm_mean_1000': "SoilGrid: Ёмкость катионного обмена почвы (ph=7) на глубине 30-60 см, х10 смоль/кг",
-		'SG_cec_60-100cm_mean_1000': "SoilGrid: Ёмкость катионного обмена почвы (ph=7) на глубине 60-100 см, х10 смоль/кг",
-		'SG_cec_100-200cm_mean_1000': "SoilGrid: Ёмкость катионного обмена почвы (ph=7) на глубине 100-200 см, х10 смоль/кг",
-		
-		'SG_cfvo_0-5cm_mean_1000': "SoilGrid: Объёмная доля крупных частиц на глубине 0-5 см, х100 %",
-		'SG_cfvo_5-15cm_mean_1000': "SoilGrid: Объёмная доля крупных частиц на глубине 5-15 см, х100 %",
-		'SG_cfvo_15-30cm_mean_1000': "SoilGrid: Объёмная доля крупных частиц на глубине 15-30 см, х100 %",
-		'SG_cfvo_30-60cm_mean_1000': "SoilGrid: Объёмная доля крупных частиц на глубине 30-60 см, х100 %",
-		'SG_cfvo_60-100cm_mean_1000': "SoilGrid: Объёмная доля крупных частиц на глубине 60-100 см, х100 %",
-		'SG_cfvo_100-200cm_mean_1000': "SoilGrid: Объёмная доля крупных частиц на глубине 100-200 см, х100 %",
-		
-		'SG_clay_0-5cm_mean_1000': "SoilGrid: Содержание глины в почве на глубине 0-5 см, х10 г/100 г",
-		'SG_clay_5-15cm_mean_1000': "SoilGrid: Содержание глины в почве на глубине 5-15 см, х10 г/100 г",
-		'SG_clay_15-30cm_mean_1000': "SoilGrid: Содержание глины в почве на глубине 15-30 см, х10 г/100 г",
-		'SG_clay_30-60cm_mean_1000': "SoilGrid: Содержание глины в почве на глубине 30-60 см, х10 г/100 г",
-		'SG_clay_60-100cm_mean_1000': "SoilGrid: Содержание глины в почве на глубине 60-100 см, х10 г/100 г",
-		'SG_clay_100-200cm_mean_1000': "SoilGrid: Содержание глины в почве на глубине 100-200 см, х10 г/100 г",
-		
-		'SG_nitrogen_0-5cm_mean_1000': "SoilGrid: Содержание азота в почве на глубине 0-5 см, х100 г/кг",
-		'SG_nitrogen_5-15cm_mean_1000': "SoilGrid: Содержание азота в почве на глубине 5-15 см, х100 г/кг",
-		'SG_nitrogen_15-30cm_mean_1000': "SoilGrid: Содержание азота в почве на глубине 15-30 см, х100 г/кг",
-		'SG_nitrogen_30-60cm_mean_1000': "SoilGrid: Содержание азота в почве на глубине 30-60 см, х100 г/кг",
-		'SG_nitrogen_60-100cm_mean_1000': "SoilGrid: Содержание азота в почве на глубине 60-100 см, х100 г/кг",
-		'SG_nitrogen_100-200cm_mean_1000': "SoilGrid: Содержание азота в почве на глубине 100-200 см, х100 г/кг",
-		
-		'SG_ocd_0-5cm_mean_1000': "SoilGrid: Плотность органического углерода в почве на глубине 0-5 см, х10 кг/куб.м",
-		'SG_ocd_5-15cm_mean_1000': "SoilGrid: Плотность органического углерода в почве на глубине 5-15 см, х10 кг/куб.м",
-		'SG_ocd_15-30cm_mean_1000': "SoilGrid: Плотность органического углерода в почве на глубине 15-30 см, х10 кг/куб.м",
-		'SG_ocd_30-60cm_mean_1000': "SoilGrid: Плотность органического углерода в почве на глубине 30-60 см, х10 кг/куб.м",
-		'SG_ocd_60-100cm_mean_1000': "SoilGrid: Плотность органического углерода в почве на глубине 60-100 см, х10 кг/куб.м",
-		'SG_ocd_100-200cm_mean_1000': "SoilGrid: Плотность органического углерода в почве на глубине 100-200 см, х10 кг/куб.м",
-		
-		'SG_soc_0-5cm_mean_1000': "SoilGrid: Почвенный органический углерод на глубине 0-5 см, х10 г/кг",
-		'SG_soc_5-15cm_mean_1000': "SoilGrid: Почвенный органический углерод на глубине 5-15 см, х10 г/кг",
-		'SG_soc_15-30cm_mean_1000': "SoilGrid: Почвенный органический углерод на глубине 15-30 см, х10 г/кг",
-		'SG_soc_30-60cm_mean_1000': "SoilGrid: Почвенный органический углерод на глубине 30-60 см, х10 г/кг",
-		'SG_soc_60-100cm_mean_1000': "SoilGrid: Почвенный органический углерод на глубине 60-100 см, х10 г/кг",
-		'SG_soc_100-200cm_mean_1000': "SoilGrid: Почвенный органический углерод на глубине 100-200 см, х10 г/кг",
-		
-		'SG_phh2o_0-5cm_mean_1000': "SoilGrid: pH воды на глубине 0-5 см, х10",
-		'SG_phh2o_5-15cm_mean_1000': "SoilGrid: pH воды на глубине 5-15 см, х10",
-		'SG_phh2o_15-30cm_mean_1000': "SoilGrid: pH воды на глубине 15-30 см, х10",
-		'SG_phh2o_30-60cm_mean_1000': "SoilGrid: pH воды на глубине 30-60 см, х10",
-		'SG_phh2o_60-100cm_mean_1000': "SoilGrid: pH воды на глубине 60-100 см, х10",
-		'SG_phh2o_100-200cm_mean_1000': "SoilGrid: pH воды на глубине 100-200 см, х10",
-		
-		'SG_sand_0-5cm_mean_1000': "SoilGrid: Содержание песка в почве на глубине 0-5 см, х10 г/100 г",
-		'SG_sand_5-15cm_mean_1000': "SoilGrid: Содержание песка в почве на глубине 5-15 см, х10 г/100 г",
-		'SG_sand_15-30cm_mean_1000': "SoilGrid: Содержание песка в почве на глубине 15-30 см, х10 г/100 г",
-		'SG_sand_30-60cm_mean_1000': "SoilGrid: Содержание песка в почве на глубине 30-60 см, х10 г/100 г",
-		'SG_sand_60-100cm_mean_1000': "SoilGrid: Содержание песка в почве на глубине 60-100 см, х10 г/100 г",
-		'SG_sand_100-200cm_mean_1000': "SoilGrid: Содержание песка в почве на глубине 100-200 см, х10 г/100 г",
-		
-		'SG_silt_0-5cm_mean_1000': "SoilGrid: Содержание илистых пород в почве на глубине 0-5 см, х10 г/100 г",
-		'SG_silt_5-15cm_mean_1000': "SoilGrid: Содержание илистых пород в почве на глубине 5-15 см, х10 г/100 г",
-		'SG_silt_15-30cm_mean_1000': "SoilGrid: Содержание илистых пород в почве на глубине 15-30 см, х10 г/100 г",
-		'SG_silt_30-60cm_mean_1000': "SoilGrid: Содержание илистых пород в почве на глубине 30-60 см, х10 г/100 г",
-		'SG_silt_60-100cm_mean_1000': "SoilGrid: Содержание илистых пород в почве на глубине 60-100 см, х10 г/100 г",
-		'SG_silt_100-200cm_mean_1000': "SoilGrid: Содержание илистых пород в почве на глубине 100-200 см, х10 г/100 г",
-		
-		'SG_wv0010_0-5cm_mean_1000': "SoilGrid: Объемная влажность при 10 кПа на глубине 0-5 см, х10 %",
-		'SG_wv0010_5-15cm_mean_1000': "SoilGrid: Объемная влажность при 10 кПа на глубине 5-15 см, х10 %",
-		'SG_wv0010_15-30cm_mean_1000': "SoilGrid: Объемная влажность при 10 кПа на глубине 15-30 см, х10 %",
-		'SG_wv0010_30-60cm_mean_1000': "SoilGrid: Объемная влажность при 10 кПа на глубине 30-60 см, х10 %",
-		'SG_wv0010_60-100cm_mean_1000': "SoilGrid: Объемная влажность при 10 кПа на глубине 60-100 см, х10 %",
-		'SG_wv0010_100-200cm_mean_1000': "SoilGrid: Объемная влажность при 10 кПа на глубине 100-200 см, х10 %",
-
-        'SG_wv0033_0-5cm_mean_1000': "SoilGrid: Объемная влажность при 33 кПа на глубине 0-5 см, х10 %",
-        'SG_wv0033_5-15cm_mean_1000': "SoilGrid: Объемная влажность при 33 кПа на глубине 5-15 см, х10 %",
-        'SG_wv0033_15-30cm_mean_1000': "SoilGrid: Объемная влажность при 33 кПа на глубине 15-30 см, х10 %",
-        'SG_wv0033_30-60cm_mean_1000': "SoilGrid: Объемная влажность при 33 кПа на глубине 30-60 см, х10 %",
-        'SG_wv0033_60-100cm_mean_1000': "SoilGrid: Объемная влажность при 33 кПа на глубине 60-100 см, х10 %",
-        'SG_wv0033_100-200cm_mean_1000': "SoilGrid: Объемная влажность при 33 кПа на глубине 100-200 см, х10 %",
-        
-        'SG_wv1500_0-5cm_mean_1000': "SoilGrid: Объемная влажность при 1500 кПа на глубине 0-5 см, х10 %",
-        'SG_wv1500_5-15cm_mean_1000': "SoilGrid: Объемная влажность при 1500 кПа на глубине 5-15 см, х10 %",
-        'SG_wv1500_15-30cm_mean_1000': "SoilGrid: Объемная влажность при 1500 кПа на глубине 15-30 см, х10 %",
-        'SG_wv1500_30-60cm_mean_1000': "SoilGrid: Объемная влажность при 1500 кПа на глубине 30-60 см, х10 %",
-        'SG_wv1500_60-100cm_mean_1000': "SoilGrid: Объемная влажность при 1500 кПа на глубине 60-100 см, х10 %",
-        'SG_wv1500_100-200cm_mean_1000': "SoilGrid: Объемная влажность при 1500 кПа на глубине 100-200 см, х10 %",
-    }
+    data = data[~np.isnan(data)]
+    data_full = data_full[~np.isnan(data_full)]
     
     try:
         # --- Статистика и гистограмма для данных наблюдений (data) ---
@@ -578,40 +437,40 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
         print('Ошибка вычисления стат показателей диаграм:')
         print(e)
         
-    
-    
     #print(band_name)
     
-    # Определяем диапазон бинов.
-    # Сначала убедимся, что data_full имеет хотя бы данные для расчета диапазона,
-    # если data пустая.
-    if data.size > 0:
-        # Если data есть, используем ее диапазон для всех гистограмм
-        #counts_data, bin_edges_data = np.histogram(data, bins=bins_num)
-        #bins_range = (bin_edges_data.min(), bin_edges_data.max())
-        counts_full_temp, bin_edges_full_temp = np.histogram(data_full, bins=bins_num)
-        counts_data, bin_edges_data = np.histogram(data_full, bins=bins_num)
-        bins_range = (bin_edges_full_temp.min(), bin_edges_full_temp.max())
-    elif data_full.size > 0:
-        # Если data пустая, но data_full есть, используем диапазон data_full
-        counts_full_temp, bin_edges_full_temp = np.histogram(data_full, bins=bins_num)
-        bins_range = (bin_edges_full_temp.min(), bin_edges_full_temp.max())
-    else:
-        # Если оба массива пусты, не можем построить гистограмму.
-        # Можно вывести сообщение или просто выйти.
-        ax.set_title("Нет данных для отображения")
-        return
+    try:
+        # Определяем диапазон бинов.
+        # Сначала убедимся, что data_full имеет хотя бы данные для расчета диапазона,
+        # если data пустая.
+        if data.size > 0:
+            # Если data есть, используем ее диапазон для всех гистограмм
+            #counts_data, bin_edges_data = np.histogram(data, bins=bins_num)
+            #bins_range = (bin_edges_data.min(), bin_edges_data.max())
+            counts_full_temp, bin_edges_full_temp = np.histogram(data_full, bins=bins_num)
+            counts_data, bin_edges_data = np.histogram(data_full, bins=bins_num)
+            bins_range = (bin_edges_full_temp.min(), bin_edges_full_temp.max())
+        elif data_full.size > 0:
+            # Если data пустая, но data_full есть, используем диапазон data_full
+            counts_full_temp, bin_edges_full_temp = np.histogram(data_full, bins=bins_num)
+            bins_range = (bin_edges_full_temp.min(), bin_edges_full_temp.max())
+        else:
+            # Если оба массива пусты, не можем построить гистограмму.
+            # Можно вывести сообщение или просто выйти.
+            ax.set_title("Нет данных для отображения")
+            return
+        # --- Расчет counts и нормализация для data ---
+        if data.size > 0:
+            counts_data, _ = np.histogram(data, bins=bins_num, range=bins_range) # Используем общий bins_range
+            max_count_data = counts_data.max() if counts_data.size > 0 else 0
+            normalized_counts_data = counts_data / max_count_data if max_count_data > 0 else np.zeros_like(counts_data)
+        else:
+            normalized_counts_data = np.zeros(bins_num) # Если data пустая, все нормализованные counts = 0
+            bin_edges_data = np.array([]) # Пустые границы, если нет данных
+    except Exception as e:
+        print('Ошибка вычисления bins_range')
+        print(e)
     
-    
-    # --- Расчет counts и нормализация для data ---
-    if data.size > 0:
-        counts_data, _ = np.histogram(data, bins=bins_num, range=bins_range) # Используем общий bins_range
-        max_count_data = counts_data.max() if counts_data.size > 0 else 0
-        normalized_counts_data = counts_data / max_count_data if max_count_data > 0 else np.zeros_like(counts_data)
-    else:
-        normalized_counts_data = np.zeros(bins_num) # Если data пустая, все нормализованные counts = 0
-        bin_edges_data = np.array([]) # Пустые границы, если нет данных
-
     # --- Расчет counts и нормализация для data_full ---
     counts_full, bin_edges_full = np.histogram(data_full, bins=bins_num, range=bins_range) # Используем общий bins_range
     max_count_full = counts_full.max() if counts_full.size > 0 else 0
@@ -621,7 +480,7 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
     total_y_max_normalized = 1.0 # Максимальное значение после нормализации
 
     plt.style.use('seaborn-v0_8-whitegrid') # Используйте подходящий стиль
-
+    
     # --- Рисуем гистограмму для всего слоя (data_full) с помощью ax.bar ---
     # Мы рисуем столбец для каждого бина. x - левая граница бина, height - нормализованная частота.
     # Ширина бина = bin_edges_full[1] - bin_edges_full[0]
@@ -635,7 +494,7 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
     # Используем bin_edges_full[:-1] как x-координаты (левые границы бинов)
     ax.bar(bin_edges_full[:-1], normalized_counts_full, width=bin_width_full, align='edge',
            color='grey', edgecolor='black', alpha=0.3, label='Распределение всего слоя')
-
+    
     # --- Рисуем гистограмму для данных наблюдений (data) с помощью ax.bar ---
     if len(bin_edges_data) > 1:
         bin_width_data = bin_edges_data[1] - bin_edges_data[0]
@@ -655,13 +514,15 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
     #print(20)
     
     # --- Заголовок и подписи осей ---
-    axtitle = f'Значения для предиктора: {band_name}'
+    pred_title = bio_info.get(band_name)['title']
+    axtitle = "Гистограмма отклика для предиктора:\n"+wrap_long_lines(pred_title, 100)
     if (title != ''):
         axtitle = axtitle + "\n" + title
-    ax.set_title(axtitle, fontsize=12, fontweight='bold')
+    #ax.set_title(axtitle, fontsize=12, fontweight='bold')
+    ax.set_title(axtitle, fontsize=9)
     ax.set_ylabel('Нормализованная Частота', fontsize=10)
     
-    xlabel_text = bio_info.get(band_name, f'Значения {band_name}')
+    xlabel_text = pred_title
     ax.set_xlabel(xlabel_text, fontsize=7)
     
     # --- Улучшаем внешний вид осей ---

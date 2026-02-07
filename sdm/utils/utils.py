@@ -25,6 +25,34 @@ def predict_suitability_for_stack(model, stack, valid_mask, batch_size=500_000):
     return suitability_flat.reshape(H, W)
 
 
+def wrap_long_lines(text, max_len=60):
+    """
+    Wraps a string to a new line if its length exceeds max_len,
+    breaking at the nearest space to the left.
+
+    Args:
+        text (str): The input string.
+        max_len (int): The maximum length of a line.
+
+    Returns:
+        str: The wrapped string with newlines.
+    """
+    if len(text) <= max_len:
+        return text
+
+    # Find the last space within the max_len limit
+    wrap_point = text.rfind(" ", 0, max_len)
+
+    # If no space is found, break at max_len (though the prompt asks for nearest space left)
+    # In a real-world scenario, you might want to handle this edge case differently,
+    # e.g., by breaking mid-word or using a different strategy.
+    if wrap_point == -1:
+        wrap_point = max_len
+
+    # Recursively wrap the rest of the text
+    return text[:wrap_point].rstrip() + "\n" + wrap_long_lines(text[wrap_point:].lstrip(), max_len)
+
+
 def read_and_to_3857(path):
     dest_crs = CRS.from_epsg(3857)
     with rasterio.open(path) as src:
@@ -203,6 +231,8 @@ def get_predictor_stats(data: np.ndarray) -> dict:
     Вычисляет основные статистические показатели для набора данных.
     """
     
+    data = data[~np.isnan(data)]
+    
     stats = {
         'mean': round_to_significant_figures(np.mean(data), 4),
         'median': round_to_significant_figures(np.median(data), 4),
@@ -254,6 +284,8 @@ def inverse_scale(scaled_data, scale_params):
     method = scale_params.get("method", "standard")
     mean = scale_params["mean"]
     scale = scale_params["scale"]
+    #print('Inverse scaling: ')
+    #print('Scale: '+str(scale)+', mean: '+str(mean))
     if method == "standard":
         return scaled_data * scale + mean
     else:

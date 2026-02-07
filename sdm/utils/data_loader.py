@@ -9,10 +9,11 @@ from .plots import plot_geotiff_with_osm
 
 def load_occurrences(df, lon_col, lat_col, month_col=''): 
     """Загружает CSV с наблюдениями, фильтрует некорректные координаты."""
-    df.loc[:, lat_col] = df[lat_col].astype(float)
-    df.loc[:, lon_col] = df[lon_col].astype(float)
     if lon_col not in df.columns or lat_col not in df.columns:
         raise ValueError(f"В CSV нет столбцов {lon_col}/{lat_col}")
+    
+    df.loc[:, lat_col] = df[lat_col].astype(float)
+    df.loc[:, lon_col] = df[lon_col].astype(float)
     if month_col=='':
         df = df[[lon_col, lat_col]]
     else:
@@ -24,7 +25,8 @@ def load_occurrences(df, lon_col, lat_col, month_col=''):
     return df
 
 
-def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME, CSV_FILENAME_ADD, MONTH_FILENAME, TEXT_FILENAME,
+def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME, CSV_FILENAME_ADD,
+                                CSV_FILTERED_FILENAME, MONTH_FILENAME, TEXT_FILENAME,
                                 IN_MIN_LON, IN_MIN_LAT, IN_MAX_LON, IN_MAX_LAT, jobs):
     
     try:
@@ -99,6 +101,16 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     #print(df[LAT_COL])
     #print(df[LON_COL])
     
+    df['lat_str'] = df[LAT_COL].astype(str)
+    numeric_values = pd.to_numeric(df['lat_str'], errors='coerce')
+    df_filtered = df[numeric_values.notna()].copy()
+    df[LAT_COL] = df_filtered[LAT_COL].astype(float)
+    
+    df['lon_str'] = df[LON_COL].astype(str)
+    numeric_values = pd.to_numeric(df['lon_str'], errors='coerce')
+    df_filtered = df[numeric_values.notna()].copy()
+    df[LON_COL] = df_filtered[LON_COL].astype(float)
+    
     print(f"Осталось записей после фильтрации: {len(df)}")
     
     # 2.2) группировка по месяцам
@@ -107,7 +119,8 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     MONTH_COL = ''
     if 'year' in df.columns:
         df_coord_filtered = df[df['year']>2010]
-        df_coord_filtered = df_coord_filtered[df_coord_filtered[LAT_COL].astype(float)>IN_MIN_LON]
+        
+        df_coord_filtered = df_coord_filtered[df_coord_filtered[LAT_COL]>IN_MIN_LON]
         df_coord_filtered = df_coord_filtered[df_coord_filtered[LAT_COL]<IN_MAX_LON]
         df_coord_filtered = df_coord_filtered[df_coord_filtered[LON_COL]>IN_MIN_LAT]
         df_coord_filtered = df_coord_filtered[df_coord_filtered[LON_COL]<IN_MAX_LAT]
@@ -133,6 +146,8 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     print("\n-- Обработка наблюдений")
     print(f"Осталось записей финально CSV: {len(occ)}")
     
+    df_coord_filtered.to_csv(CSV_FILTERED_FILENAME, index=False)
+    
     with open(TEXT_FILENAME, 'a') as f:
         f.write(f"{len(occ)}")
     
@@ -147,7 +162,7 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     return {'LAT_COL': LAT_COL, 'LON_COL': LON_COL, 'df': df, 'occ': occ, 'status': 'done', 'species': species}
 
 
-def load_environmental_predictors(raster_dir, predictors = 'all', period='current', scales=''):
+def load_environmental_predictors(raster_dir, predictors = 'all', period='current', scales='', bio_info=''):
     """Считывает все GeoTIFF из папки и строит стек (bands, H, W).
        Возвращает: stack(float32), valid_mask(bool), transform, crs, profile, band_names(list)"""
     
@@ -231,7 +246,7 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
                 band = os.path.splitext(os.path.basename(fp))[0]
                 mean = scales[band]['mean']
                 sc = scales[band]['scale']
-                plot_geotiff_with_osm(fp, fpjpg, mean, sc, band)
+                plot_geotiff_with_osm(fp, fpjpg, mean, sc, band, bio_info)
             
     
     for i, fp in enumerate(tifs):
@@ -252,7 +267,10 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
             band_names.append(os.path.splitext(os.path.basename(fp))[0])
     stack = np.stack(band_arrays, axis=0)  # shape: (bands, H, W)
     # Маска валидных пикселей: валиден, если нет NaN во всех слоях
-    valid_mask = np.all(~np.isnan(stack), axis=0)
+    #valid_mask = np.all(~np.isnan(stack), axis=0)
+    # NB: слои SoilGrids портят картинку своими масками, особенно это касается берегов рек.
+    # Решил на данный момент отключить маску валидности.
+    valid_mask = np.ones(stack.shape[1:], dtype=bool)
     # Профиль для сохранения результата
     profile = {
         "driver": "GTiff",

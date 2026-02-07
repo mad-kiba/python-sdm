@@ -25,6 +25,7 @@ from .utils.utils import sample_background, extract_features_from_stack, inverse
 from .utils.utils import save_geotiff, predict_suitability_for_stack
 from .utils.plots import create_beautiful_histogram, draw_map, create_animated_gif, create_avi_from_images
 from .utils.models import MaxEnt
+from .utils.predictors_info import get_predictors_info
 
 class PythonSDM:
     def __init__(self, config):
@@ -71,15 +72,18 @@ class PythonSDM:
         
         self.TEXT_FILENAME = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'.txt'
         self.PRED_FILENAME = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_pred.txt'
-        self.STACK_FILENAME = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_stack.txt'
+        #self.STACK_FILENAME = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_stack.txt' # больше не нужно
         self.MONTH_FILENAME = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_month.txt'
         self.CSV_FILENAME = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'.csv'
         self.CSV_FILENAME_ADD = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_add.csv'
+        self.CSV_FILTERED_FILENAME = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_filtered.csv'
         self.GISTO_STATS = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_gistos.js'
         self.FUTURE_SUITS = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_futures.js'
         
         os.makedirs('output/texts/'+str(self.IN_ID)+'/', exist_ok=True)
         os.makedirs('output/suitability/'+str(self.IN_ID)+'/', exist_ok=True)
+        
+        self.bio_info = get_predictors_info()
         
         # для запуска в многопоточном режиме
         j = self.JOBS.get(self.IN_ID)
@@ -99,7 +103,8 @@ class PythonSDM:
         print(f"\n-- 2. Загрузка наблюдений ({self.IN_ID})")
         
         try:
-            ret = load_species_occurrence_data(self.IN_ID, self.IN_CSV, self.IN_CSV_ADDITIONAL, self.CSV_FILENAME, self.CSV_FILENAME_ADD,
+            ret = load_species_occurrence_data(self.IN_ID, self.IN_CSV, self.IN_CSV_ADDITIONAL,
+                                               self.CSV_FILENAME, self.CSV_FILENAME_ADD, self.CSV_FILTERED_FILENAME,
                                                self.MONTH_FILENAME, self.TEXT_FILENAME,
                                                self.IN_MIN_LON, self.IN_MIN_LAT, self.IN_MAX_LON, self.IN_MAX_LAT, self.JOBS)
         except Exception as e:
@@ -122,9 +127,10 @@ class PythonSDM:
         print(f"\n-- 3. Загрузка предикторов ({self.IN_ID})")
         try:
             with open(self.SCALES_FILE, 'r') as f:
-                scales_config = json.load(f)
+                self.scales_config = json.load(f)
+            
             self.stack, self.valid_mask, self.transform, self.crs, self.profile, self.band_names, self.band_paths = \
-                load_environmental_predictors(self.RASTER_DIR, self.PREDICTORS, scales = scales_config)
+                load_environmental_predictors(self.RASTER_DIR, self.PREDICTORS, scales = self.scales_config, bio_info = self.bio_info)
             self.bands, self.H, self.W = self.stack.shape
         except Exception as e:
             print(e)
@@ -162,8 +168,9 @@ class PythonSDM:
         # Фильтруем те, что внутри растра
         rows, cols = rows[inside], cols[inside]
         # И те, что попадают на валидные пиксели (без NaN во всех слоях)
-        valid_here = self.valid_mask[rows, cols]
-        rows, cols = rows[valid_here], cols[valid_here]
+        # NB: если использовать valid_mask из всех слоёв - сильно портится результат
+        #valid_here = self.valid_mask[rows, cols]
+        #rows, cols = rows[valid_here], cols[valid_here]
         
         print(f"Присутствий внутри валидной области: {len(rows)}")
         
@@ -189,8 +196,9 @@ class PythonSDM:
         valid_pixels_mask = self.valid_mask[rows_full_flat, cols_full_flat]
         
         # Применяем булеву маску, чтобы получить только валидные индексы
-        self.rows_full = rows_full_flat[valid_pixels_mask]
-        self.cols_full = cols_full_flat[valid_pixels_mask]
+        # NB: если использовать valid_mask из всех слоёв - сильно портится результат
+        self.rows_full = rows_full_flat #[valid_pixels_mask]
+        self.cols_full = cols_full_flat #[valid_pixels_mask]
         
         self.rows = rows
         self.cols = cols
@@ -302,19 +310,13 @@ class PythonSDM:
         self.X = np.vstack([self.X_pres, self.X_bg])
         self.y = np.hstack([np.ones(len(self.X_pres), dtype=int), np.zeros(len(self.X_bg), dtype=int)])
         print(f"Матрица признаков: {self.X.shape}, классы: {np.bincount(self.y)}")
-        
-        np.savetxt(self.STACK_FILENAME, self.X_orig, delimiter=";", fmt="%d")
-    
+
 
     def draw_gistos(self):
         # 8) постройка гистограмм
         if self.DO_GISTO == 1:
             print(f"\n-- 8. Постройка гистограмм ({self.IN_ID})")
             num_predictors = len(self.band_names) # Получаем точное количество предикторов
-            #print(SCALES_FILE)
-            
-            with open(self.SCALES_FILE, 'r') as f:
-                scales_config = json.load(f)
                 
             # Динамически определяем количество строк и столбцов для сетки
             # Делаем сетку максимально приближенной к квадрату
@@ -352,8 +354,10 @@ class PythonSDM:
                 scaled_data_for_plot_full = self.X_full[:, i] 
                 # Получаем параметры масштабирования для текущего предиктора
                 # Убедитесь, что band_name соответствует ключам в scales_config
-                scale_params = scales_config.get(band_name)
+                scale_params = self.scales_config.get(band_name)
                 # Применяем обратное преобразование, если параметры найдены
+                #print('Scale params for name: ' + band_name)
+                #print(scale_params)
                 
                 layer_data = ''
                 
@@ -365,11 +369,11 @@ class PythonSDM:
                     data_for_plot_original_scale = inverse_scale(scaled_data_for_plot, scale_params)
                     data_for_plot_original_scale_full = inverse_scale(scaled_data_for_plot_full, scale_params)
                     gist = create_beautiful_histogram(ax_single, data_for_plot_original_scale, band_name, bins_num,
-                                                      data_for_plot_original_scale_full, title)
+                                                      data_for_plot_original_scale_full, self.bio_info, title)
                 else:
                     print(f"Предупреждение: Параметры масштабирования не найдены для '{band_name}'. Отображаются масштабированные значения.")
                     gist = create_beautiful_histogram(ax_single, scaled_data_for_plot, band_name, bins_num,
-                                                      scaled_data_for_plot_full, title)
+                                                      scaled_data_for_plot_full, self.bio_info, title)
                 
                 gistos_info[band_name] = gist
                 
@@ -380,7 +384,7 @@ class PythonSDM:
                 os.makedirs(dir_path, exist_ok=True)
                 output_filename = os.path.join(self.OUTPUT_HISTOGRAMS_DIR, str(self.IN_ID), f"{safe_band_name}.png")
                 # Сохраняем фигуру
-                plt.savefig(output_filename, dpi=300, bbox_inches='tight') # dpi для качества, bbox_inches='tight' для обрезки лишних полей
+                plt.savefig(output_filename, dpi=200, bbox_inches='tight') # dpi для качества, bbox_inches='tight' для обрезки лишних полей
                 print(f"Сохранена гистограмма: {i} - {output_filename}")
                 plt.close(fig_single) # Закрываем фигуру, чтобы освободить память
             plt.close(fig)
@@ -634,7 +638,7 @@ class PythonSDM:
                         # Загружаем будущие предикторы строго в порядке self.PREDICTORS;
                         # если load_raster_stack не гарантирует порядок, переупорядочим по именам
                         stack_fut, valid_mask_fut, transform_fut, crs_fut, profile_fut, band_names_fut, band_paths = \
-                            load_environmental_predictors(self.RASTER_DIR, self.PREDICTORS, scen_dir)
+                            load_environmental_predictors(self.RASTER_DIR, self.PREDICTORS, scen_dir, '', self.bio_info)
                         
                         suitability_f = predict_suitability_for_stack(self.model, stack_fut, valid_mask_fut, batch_size=500_000)
                         
