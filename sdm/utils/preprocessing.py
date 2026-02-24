@@ -147,7 +147,8 @@ def process_single_geotiff(input_filepath: str, output_dir: str, target_crs: str
         return None
 
 
-def clip_rasters(RAW_RASTER_DIR, OUTPUT_RASTER_DIR, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MAX_LON, MODEL_FUTURE, IN_RESOLUTION):
+def clip_rasters(RAW_RASTER_DIR, OUTPUT_RASTER_DIR, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MAX_LON,
+                 MODEL_FUTURE, MODEL_PAST, MODEL_SEASON, IN_RESOLUTION):
     if IN_MIN_LAT==0:
         return
     
@@ -172,13 +173,15 @@ def clip_rasters(RAW_RASTER_DIR, OUTPUT_RASTER_DIR, IN_MIN_LAT, IN_MIN_LON, IN_M
     for root, _, files in os.walk(RAW_RASTER_DIR):
         # пропускаем обработку предикторов будущего, если это не требуется
         if MODEL_FUTURE == 0:
-            if '2021-2040' in root:
+            if 'dynamic_predictable' in root:
                 continue
-            if '2041-2060' in root:
+        
+        if MODEL_PAST == 0:
+            if 'dynamic_past' in root:
                 continue
-            if '2061-2080' in root:
-                continue
-            if '2081-2100' in root:
+            
+        if MODEL_SEASON == 0:
+            if 'dynamic_monthly' in root:
                 continue
     
         # Относительный путь текущей подпапки относительно корня RAW_RASTER_DIR

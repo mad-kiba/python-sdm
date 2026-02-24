@@ -15,6 +15,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import roc_auc_score
 from rasterio.transform import xy
+from sklearn.calibration import CalibratedClassifierCV
 #import libpysal - нужно для расчётов Moran's I, сейчас не используется
 #import esda
 
@@ -47,9 +48,11 @@ class PythonSDM:
         self.OUTPUT_SUITABILITY_JPG = "output/suitability/"+str(self.IN_ID)+"/suitability_"+str(self.IN_ID)+".jpg"
         self.OUTPUT_HISTOGRAMS_DIR = "output/gistos"
         self.OUTPUT_PREDICTIONS_DIR = "output/predictions"
+        self.OUTPUT_PAST_DIR = "output/past"
         self.OUTPUT_SEASONS_DIR = "output/seasons"
         
         self.OUTPUT_FUTURE_DIR = os.path.join(self.OUTPUT_PREDICTIONS_DIR, str(self.IN_ID))
+        self.OUTPUT_PAST_DIR = os.path.join(self.OUTPUT_PAST_DIR, str(self.IN_ID))
         self.OUTPUT_SEASONS_DIR = os.path.join(self.OUTPUT_SEASONS_DIR, str(self.IN_ID))
         
         self.RAW_RASTER_DIR = "input_predictors"
@@ -62,7 +65,8 @@ class PythonSDM:
         self.RASTER_DIR = self.OUTPUT_RASTER_DIR # папка с GeoTIFF-предикторами
         
         if self.SCENARIOS == 'all':
-            self.SCENARIOS = 'SSP126_EC-Earth3-Veg,SSP245_EC-Earth3-Veg,SSP370_EC-Earth3-Veg,SSP585_EC-Earth3-Veg'
+            #self.SCENARIOS = 'SSP126_EC-Earth3-Veg,SSP245_EC-Earth3-Veg,SSP370_EC-Earth3-Veg,SSP585_EC-Earth3-Veg' # old for WorldClim
+            self.SCENARIOS = 'ssp126,ssp370,ssp585' # new for CHELSA
         
         # Сколько фоновых точек генерировать: мин(10000, 10 * N_presence)
         self.MAX_BG = 10000
@@ -94,8 +98,12 @@ class PythonSDM:
     def prepare_predictors(self):
         # 1) Подготовка предикторов к нужным координатам
         print(f"\n-- 1. Подготовка предикторов ({self.IN_ID})")
-        clip_rasters(self.RAW_RASTER_DIR, self.OUTPUT_RASTER_DIR, self.IN_MIN_LAT, self.IN_MIN_LON,
-                     self.IN_MAX_LAT, self.IN_MAX_LON, self.MODEL_FUTURE, self.IN_RESOLUTION)
+        try:
+            clip_rasters(self.RAW_RASTER_DIR, self.OUTPUT_RASTER_DIR, self.IN_MIN_LAT, self.IN_MIN_LON,
+                         self.IN_MAX_LAT, self.IN_MAX_LON, self.MODEL_FUTURE, self.MODEL_PAST, self.MODEL_SEASON, self.IN_RESOLUTION)
+        except Exception as e:
+            print('Ошибка подготовки предикторов:')
+            print(e)
         
     
     def load_occurences(self):
@@ -122,35 +130,43 @@ class PythonSDM:
         self.species = ret['species']
     
     
-    def load_predictors(self):
+    def load_predictors(self, period = 'current', month = ''):
         # 3) Загрузка стека предикторов
         print(f"\n-- 3. Загрузка предикторов ({self.IN_ID})")
         try:
             with open(self.SCALES_FILE, 'r') as f:
                 self.scales_config = json.load(f)
             
-            self.stack, self.valid_mask, self.transform, self.crs, self.profile, self.band_names, self.band_paths = \
-                load_environmental_predictors(self.RASTER_DIR, self.PREDICTORS, scales = self.scales_config, bio_info = self.bio_info)
+            if period == 'current':
+                self.stack, self.valid_mask, self.transform, self.crs, self.profile, self.band_names, self.band_paths = \
+                    load_environmental_predictors(self.RASTER_DIR, self.PREDICTORS, scales = self.scales_config, bio_info = self.bio_info)
+            
+            if period == 'monthly':
+                self.stack, self.valid_mask, self.transform, self.crs, self.profile, self.band_names, self.band_paths = \
+                    load_environmental_predictors(self.RASTER_DIR, self.PREDICTORS, period = 'monthly', interval = month, bio_info = self.bio_info)
+            
             self.bands, self.H, self.W = self.stack.shape
         except Exception as e:
             print(e)
             return {'status': 'terminated', 'error': str(e), 'code': 401}
         
+        
         print(f"\n-- Загружено предикторов: {self.bands} | Размер: {self.H} x {self.W} | CRS: {self.crs}")
         print("Слои:", self.band_names)
         
-        with open(self.TEXT_FILENAME, 'a') as f:
-            f.write(f"\n{self.bands} | Размер: {self.H} x {self.W} | CRS: {self.crs}")
-            f.write(f"\n{self.band_names}")
-        
-        try:
-            basepath = 'output_predictors/'
-            with zipfile.ZipFile(self.PREDICTORS_JPEGS+"/"+str(self.IN_ID)+".zip", "w", compression=zipfile.ZIP_DEFLATED) as z:
-                for p in map(Path, self.band_paths):
-                    z.write(p, arcname=p.relative_to(basepath))  # все файлы в корне архива
-        except Exception as e:
-            print(e)
-        print("Проекции предикторов сохранены в архив")
+        if period == 'current':
+            with open(self.TEXT_FILENAME, 'a') as f:
+                f.write(f"\n{self.bands} | Размер: {self.H} x {self.W} | CRS: {self.crs}")
+                f.write(f"\n{self.band_names}")
+            
+            try:
+                basepath = 'output_predictors/'
+                with zipfile.ZipFile(self.PREDICTORS_JPEGS+"/"+str(self.IN_ID)+".zip", "w", compression=zipfile.ZIP_DEFLATED) as z:
+                    for p in map(Path, self.band_paths):
+                        z.write(p, arcname=p.relative_to(basepath))  # все файлы в корне архива
+            except Exception as e:
+                print(e)
+            print("Проекции предикторов сохранены в архив")
     
     
     def prepare_data(self, month = 0):
@@ -317,7 +333,7 @@ class PythonSDM:
         if self.DO_GISTO == 1:
             print(f"\n-- 8. Постройка гистограмм ({self.IN_ID})")
             num_predictors = len(self.band_names) # Получаем точное количество предикторов
-                
+            
             # Динамически определяем количество строк и столбцов для сетки
             # Делаем сетку максимально приближенной к квадрату
             cols_num = int(math.ceil(math.sqrt(num_predictors))) # Количество столбцов
@@ -331,7 +347,7 @@ class PythonSDM:
                 axes = np.array([axes])
             elif num_predictors == 0:
                 axes = np.array([]) # Пустой массив, если нет предикторов
-                
+            
             # Регулируем количество бинов, если оно больше, чем количество уникальных значений (что маловероятно, но для безопасности)
             bins_num = 50
             if bins_num > len(np.unique(self.X_pres)):
@@ -351,7 +367,8 @@ class PythonSDM:
                 fig_single, ax_single = plt.subplots(1, 1, figsize=(7, 5)) # Размер одного графика
                 # Получаем масштабированные данные (они уже в X_pres)
                 scaled_data_for_plot = self.X_pres[:, i]
-                scaled_data_for_plot_full = self.X_full[:, i] 
+                scaled_data_for_plot_full = self.X_full[:, i]
+                
                 # Получаем параметры масштабирования для текущего предиктора
                 # Убедитесь, что band_name соответствует ключам в scales_config
                 scale_params = self.scales_config.get(band_name)
@@ -366,10 +383,15 @@ class PythonSDM:
                     title = 'Вид: '+self.species
                 
                 if scale_params:
-                    data_for_plot_original_scale = inverse_scale(scaled_data_for_plot, scale_params)
-                    data_for_plot_original_scale_full = inverse_scale(scaled_data_for_plot_full, scale_params)
-                    gist = create_beautiful_histogram(ax_single, data_for_plot_original_scale, band_name, bins_num,
-                                                      data_for_plot_original_scale_full, self.bio_info, title)
+                    try:
+                        data_for_plot_original_scale = inverse_scale(scaled_data_for_plot, scale_params, self.bio_info[band_name])
+                        data_for_plot_original_scale_full = inverse_scale(scaled_data_for_plot_full, scale_params, self.bio_info[band_name])
+                        
+                        gist = create_beautiful_histogram(ax_single, data_for_plot_original_scale, band_name, bins_num,
+                                                          data_for_plot_original_scale_full, self.bio_info, title)
+                    except Exception as e:
+                        print('Ошибка построения гистограммы:')
+                        print(e)
                 else:
                     print(f"Предупреждение: Параметры масштабирования не найдены для '{band_name}'. Отображаются масштабированные значения.")
                     gist = create_beautiful_histogram(ax_single, scaled_data_for_plot, band_name, bins_num,
@@ -426,12 +448,17 @@ class PythonSDM:
         # 10) Обучение модели
         print(f"\n-- 10. Обучение модели ({self.IN_ID})")
         
-        if (self.IN_MODEL=='MaxEnt'):
-            self.model = MaxEnt(X_pres=self.X_pres, X_bg=self.X_bg)
-            self.model.fit(
-                maxiter=500,
-                tol=1e-5
-            )
+        try:
+            if (self.IN_MODEL=='MaxEnt'):
+                self.model = MaxEnt(X_pres=self.X_pres, X_bg=self.X_bg)
+                self.model.fit(
+                    maxiter=500,
+                    tol=1e-5
+                )
+        except Exception as e:
+            print(e)
+            return {'status': 'terminated', 'error': str(e), 'code': 401}
+            
         
         if (self.IN_MODEL=='RandomForest'):
             self.model = RandomForestClassifier(
@@ -460,10 +487,10 @@ class PythonSDM:
             self.model.fit(self.X_train, self.y_train)
         
         y_prob = self.model.predict_proba(self.X_test)[:, 1]
-        #print(model.predict_proba(X_test))
         
         self.auc = roc_auc_score(self.y_test, y_prob)
         print(f"ROC AUC (holdout): {self.auc:.3f}")
+        
         
         # Если это основной прогон - записываем auc
         if month==0:
@@ -589,7 +616,7 @@ class PythonSDM:
                 PREDICTORS_EXP = [p.strip() for p in self.PREDICTORS.split(',') if p.strip()]
             
             
-            OUTPUT_SUITABILITY_TIF = self.OUTPUT_FUTURE_DIR + "/1970-2000.tif"
+            OUTPUT_SUITABILITY_TIF = self.OUTPUT_FUTURE_DIR + "/1981-2010.tif"
             save_geotiff(OUTPUT_SUITABILITY_TIF, self.suitability, self.profile)
             print(f"Карта пригодности сохранена: {OUTPUT_SUITABILITY_TIF}")
             
@@ -597,7 +624,7 @@ class PythonSDM:
             if self.species!='':
                 title = 'Карта вероятности присутствия вида '+self.species+\
                         f" ({self.IN_ID})\nТекущий период (базовые климатические переменные)"
-            OUTPUT_SUITABILITY_JPG = self.OUTPUT_FUTURE_DIR + "/1970-2000.jpg"
+            OUTPUT_SUITABILITY_JPG = self.OUTPUT_FUTURE_DIR + "/1981-2010.jpg"
             draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title, self.rows_coord, self.cols_coord)
             print(f"Карта пригодности сохранена: {OUTPUT_SUITABILITY_JPG}")
             #os.remove(OUTPUT_SUITABILITY_TIF) # пока не удаляем tif для будущего
@@ -613,8 +640,8 @@ class PythonSDM:
             hi_sui95 = np.sum(mask_high_suitability95)
             try:
                 future_stats = {}
-                future_stats['1970-2000'] = []
-                future_stats['1970-2000'].append({'n05': hi_sui05, 'n50': hi_sui50, 'n95': hi_sui95})
+                future_stats['1981-2010'] = []
+                future_stats['1981-2010'].append({'n05': hi_sui05, 'n50': hi_sui50, 'n95': hi_sui95})
             except Exception as e:
                 print('Ошибка')
                 print(str(e))
@@ -626,26 +653,31 @@ class PythonSDM:
             for period in sorted(d for d in os.listdir(FUTURE_ROOT_DIR)
                                  if os.path.isdir(os.path.join(FUTURE_ROOT_DIR, d))):
                 period_dir = os.path.join(FUTURE_ROOT_DIR, period)
-                #print(period)
+                print(period)
             
                 for scenario in sorted(d for d in os.listdir(period_dir)
                                        if os.path.isdir(os.path.join(period_dir, d))):
-                    #print(scenario)
+                    print(scenario)
                     if scenario in self.SCENARIOS.split(','):
                         scen_dir = os.path.join(period, scenario)
                         print(f"\nПрогноз: {period} / {scenario}")
                         
                         # Загружаем будущие предикторы строго в порядке self.PREDICTORS;
-                        # если load_raster_stack не гарантирует порядок, переупорядочим по именам
                         stack_fut, valid_mask_fut, transform_fut, crs_fut, profile_fut, band_names_fut, band_paths = \
-                            load_environmental_predictors(self.RASTER_DIR, self.PREDICTORS, scen_dir, '', self.bio_info)
+                            load_environmental_predictors(self.RASTER_DIR, self.PREDICTORS, 'future', scen_dir, '', self.bio_info)
                         
-                        suitability_f = predict_suitability_for_stack(self.model, stack_fut, valid_mask_fut, batch_size=500_000)
+                        # делаем прогноз для будущего с той же моделью, с которой делали текущее
+                        try:
+                            suitability_f = predict_suitability_for_stack(self.model, stack_fut, valid_mask_fut, batch_size=500_000)
+                        except Exception as e:
+                            print('Ошибка прогноза будущего')
+                            print(str(e))
                         
                         out_name = f"{period}-{scenario}.tif"
                         out_path = os.path.join(self.OUTPUT_FUTURE_DIR, out_name)
                         save_geotiff(out_path, suitability_f, profile_fut)
                         print(f"Сохранено: {out_path}")
+                        
                         
                         mask_high_suitability05 = suitability_f > 0.05
                         hi_sui05 = np.sum(mask_high_suitability05)
@@ -670,7 +702,7 @@ class PythonSDM:
                         future_imgs[scenario].append(out_path_img)
                         future_stats[scenario].append({'n05': hi_sui05, 'n50': hi_sui50, 'n95': hi_sui95})
                         
-                        if period=='2081-2100': # дублируем последний слайд, чтобы была пауза в анимации
+                        if period=='2071-2100': # дублируем последний слайд, чтобы была пауза в анимации
                             future_imgs[scenario].append(out_path_img)
                         
                         #print(out_path)
@@ -682,7 +714,7 @@ class PythonSDM:
                                     f" ({self.IN_ID})\nПериод: "+period+" (сценарий "+scenario+")"
                         
                         draw_map(out_path, out_path_img, title, self.rows_coord, self.cols_coord)
-                        if scenario!='SSP370_EC-Earth3-Veg':
+                        if scenario!='SSP370_EC-Earth3-Veg' and scenario!='ssp370':
                             os.remove(out_path) # пока не удаляем tif для будущего
             
             try:
@@ -725,16 +757,33 @@ class PythonSDM:
             print(f"Все файлы из '{self.OUTPUT_FUTURE_DIR}' успешно упакованы в '{archive_path}'.")
             
     
+    def predict_past(self):
+        # 14) если это стандартный регион - делаем с нашей моделью прогноз прошлого
+        if self.MODEL_PAST==1 and self.IN_MODEL!='MaxEnt':
+            print(f"\n-- 14. Приступаю к прогнозу прошлого ({self.IN_ID})")
+            # Пути
+            PAST_ROOT_DIR = os.path.join(self.OUTPUT_RASTER_DIR, 'dynamic_past')   # где лежат папки периодов 2021-2040, ...
+            
+            os.makedirs(self.OUTPUT_PAST_DIR, exist_ok=True)
+    
+    
     def predict_monthly(self):
-        # 14) сезонный прогноз
-        if self.DO_SEASON == 1 and 'month' in self.df.columns:
-            print(f"\n-- 14. Приступаю к помесячному моделированию")
+        # 15) сезонный прогноз
+        if self.MODEL_SEASON == 1 and 'month' in self.df.columns:
+            print(f"\n-- 15. Приступаю к помесячному моделированию")
             self.monthly_imgs = []
             os.makedirs("output/seasons/"+str(self.IN_ID), exist_ok=True)
             
             try:
                 for month in range(1, 13):
                     print(f"\n---- Прогноз для месяца {month}")
+                    
+                    MONTHLY_ROOT_DIR = os.path.join(self.OUTPUT_RASTER_DIR, 'dynamic_monthly')   # где лежат папки месяцев 1, 2, ...
+                    period_dir = os.path.join(MONTHLY_ROOT_DIR, str(month))
+                    
+                    
+                    # а почему тут нет загрузки предикторов?
+                    self.load_predictors('monthly', month)
                     self.prepare_data(month)
                     self.deduplicate_data(month)
                     if self.n_presence>5:

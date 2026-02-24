@@ -278,7 +278,7 @@ def save_geotiff(output_path, array2d, profile):
         dst.write(array2d.astype("float32"), 1)
         
 
-def inverse_scale(scaled_data, scale_params):
+def inverse_scale(scaled_data, scale_params, info):
     if scale_params is None or "mean" not in scale_params or "scale" not in scale_params:
         return scaled_data
     method = scale_params.get("method", "standard")
@@ -286,8 +286,15 @@ def inverse_scale(scaled_data, scale_params):
     scale = scale_params["scale"]
     #print('Inverse scaling: ')
     #print('Scale: '+str(scale)+', mean: '+str(mean))
+    diff = info.get('diff')
+    dsca = info.get('scale')
+    if diff:
+        mean = mean - diff
     if method == "standard":
-        return scaled_data * scale + mean
+        data = scaled_data * scale + mean
+        if (dsca):
+            data = (scaled_data * scale + mean)/dsca
+        return data
     else:
         return scaled_data
 

@@ -137,6 +137,9 @@ def plot_geotiff_with_osm(geotiff_path: str, output_path: str, mean: float, scal
     """
 
     print(f"Загрузка GeoTIFF: {geotiff_path}")
+    
+    band_info = bio_info.get(band)
+    
     with rasterio.open(geotiff_path) as src:
         # 1. Чтение и репроекция GeoTIFF данных в EPSG:3857 (Web Mercator)
         # Это позволяет базовой карте OSM отображаться без искажений.
@@ -144,6 +147,8 @@ def plot_geotiff_with_osm(geotiff_path: str, output_path: str, mean: float, scal
         data_src = data_src.astype(np.float64)
         data_src[data_src == src.nodata] = np.nan
         target_crs = 'EPSG:3857'
+        
+        
         
         if src.crs == target_crs:
             reprojected_data = data_src
@@ -200,7 +205,7 @@ def plot_geotiff_with_osm(geotiff_path: str, output_path: str, mean: float, scal
             fig_h = long_inches
             fig_w = max(long_inches * ratio, 1e-3) # Не допускаем нулевой ширины
         
-        print(f"Динамически рассчитанные figsize: ({fig_w:.2f}, {fig_h:.2f}), dpi: {dpi}")
+        #print(f"Динамически рассчитанные figsize: ({fig_w:.2f}, {fig_h:.2f}), dpi: {dpi}")
         fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
 
         # Устанавливаем лимиты осей в метрах (Web Mercator)
@@ -211,29 +216,72 @@ def plot_geotiff_with_osm(geotiff_path: str, output_path: str, mean: float, scal
         # В проекции Web Mercator, для неискаженного отображения, достаточно 'equal'.
         # Поскольку figsize уже соответствует аспекту данных, 'adjustable' можно и не указывать,
         # но для большей надёжности оставим.
-        print(f"Установка аспекта 'equal' для EPSG:3857.")
+        #print(f"Установка аспекта 'equal' для EPSG:3857.")
         ax.set_aspect('equal', adjustable='box')
 
         # 4. Наложение базовой карты OSM с помощью contextily
-        print("Загрузка контекстной карты OSM (contextily)...")
+        #print("Загрузка контекстной карты OSM (contextily)...")
         try:
             ctx.add_basemap(ax, crs=target_crs, source=ctx.providers.OpenStreetMap.Mapnik, attribution=False)
-            print("Контекстная карта OSM добавлена без искажений.")
+            #print("Контекстная карта OSM добавлена без искажений.")
         except Exception as e:
             print(f"Не удалось добавить контекстную карту OSM: {e}. Продолжаем без карты.")
 
+
+        # минимальное и максимальное значения
+        min_val = band_info.get('min_val')
+        max_val = band_info.get('max_val')
+        
+        delta = 0
+        predictor_scale = 1
+        if band_info.get('diff'):
+            delta = band_info.get('diff')
+        if band_info.get('scale'):
+            predictor_scale = band_info.get('scale')
+            
+            
+        if min_val is not None:
+            min_val_scaled = (min_val * predictor_scale - mean + delta) / scale
+            reprojected_data[reprojected_data<min_val_scaled] = np.nan
+        
         # Отображение GeoTIFF данных
-        im = ax.imshow(reprojected_data, cmap='bone', extent=extent_m, origin='upper', aspect='auto', alpha=0.7, zorder=1)
+        im = ax.imshow(reprojected_data, cmap='coolwarm', extent=extent_m, origin='upper', aspect='auto', alpha=0.7, zorder=1)
         
         # 5. Настройка шкалы значений
         cbar = plt.colorbar(im, ax=ax, orientation='vertical', shrink=0.7)
         
         ticks = cbar.get_ticks()
-        cbar.set_ticks(ticks) 
-        original_values_ticks = ticks * scale + mean
-        cbar.set_ticklabels([f'{val:.2f}' for val in original_values_ticks])
         
-        cbar.set_label(f'Значение слоя (оригинальные единицы, mean={mean:.2f}, scale={scale:.2f})')
+        
+        if min_val is not None:
+            #min_scaled_value_on_colorbar = min_val
+            min_scaled_value_on_colorbar = (min_val * predictor_scale - mean + delta) / scale
+            if min_scaled_value_on_colorbar<min(ticks):
+                min_scaled_value_on_colorbar=min(ticks)
+        else:
+            min_scaled_value_on_colorbar = min(ticks)
+            
+        if max_val is not None:
+            #max_scaled_value_on_colorbar = max_val
+            max_scaled_value_on_colorbar = (max_val * predictor_scale - mean + delta) / scale
+            if max_scaled_value_on_colorbar>max(ticks):
+                max_scaled_value_on_colorbar = max(ticks)
+        else:
+            max_scaled_value_on_colorbar = max(ticks)
+        
+        
+        new_ticks = np.linspace(min_scaled_value_on_colorbar, max_scaled_value_on_colorbar, num=len(ticks))
+        
+        cbar.set_ticks(new_ticks) 
+        original_values_ticks = (new_ticks * scale + mean - delta)/predictor_scale
+        
+        
+        if band_info.get('step')==1:
+            cbar.set_ticklabels([f'{val:.0f}' for val in original_values_ticks])
+        else:
+            cbar.set_ticklabels([f'{val:.2f}' for val in original_values_ticks])
+        
+        #cbar.set_label(f'Значение слоя (оригинальные единицы, mean={mean:.2f}, scale={scale:.2f})')
 
         # 6. Преобразование меток осей из EPSG:3857 (метры) в EPSG:4326 (градусы)
         transformer = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True) 
@@ -265,6 +313,8 @@ def plot_geotiff_with_osm(geotiff_path: str, output_path: str, mean: float, scal
         pred_title = band
         if bio_info:
             pred_title = bio_info.get(band)['title']
+            if bio_info.get(band)['unit']!='':
+                pred_title = pred_title + ', ' + bio_info.get(band)['unit']
         ax.set_title(pred_title, fontsize=8)
         ax.grid(True, linestyle='--', alpha=0.6)
 
@@ -428,6 +478,18 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
     data = data[~np.isnan(data)]
     data_full = data_full[~np.isnan(data_full)]
     
+    min_val = bio_info.get(band_name).get('min_val')
+    max_val = bio_info.get(band_name).get('max_val')
+    
+    if min_val is not None:
+        data = data[data>min_val]
+        data_full = data_full[data_full>min_val]
+    if max_val is not None:
+        data = data[data<max_val]
+        data_full = data_full[data_full<max_val]
+    
+    stats_data = {}
+    stats_predictor = {}
     try:
         # --- Статистика и гистограмма для данных наблюдений (data) ---
         stats_data = get_predictor_stats(data)
@@ -436,8 +498,14 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
     except Exception as e:
         print('Ошибка вычисления стат показателей диаграм:')
         print(e)
-        
-    #print(band_name)
+    
+    #print(stats_data)
+    stats_data['unit'] = bio_info.get(band_name).get('unit')
+    stats_data['scale'] = bio_info.get(band_name).get('scale')
+    stats_data['min_val'] = bio_info.get(band_name).get('min_val')
+    stats_data['max_val'] = bio_info.get(band_name).get('max_val')
+    stats_data['test'] = 'tests'
+    
     
     try:
         # Определяем диапазон бинов.
@@ -471,6 +539,7 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
         print('Ошибка вычисления bins_range')
         print(e)
     
+    
     # --- Расчет counts и нормализация для data_full ---
     counts_full, bin_edges_full = np.histogram(data_full, bins=bins_num, range=bins_range) # Используем общий bins_range
     max_count_full = counts_full.max() if counts_full.size > 0 else 0
@@ -478,7 +547,7 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
     
     # --- Определение общей максимальной высоты для графика ---
     total_y_max_normalized = 1.0 # Максимальное значение после нормализации
-
+    
     plt.style.use('seaborn-v0_8-whitegrid') # Используйте подходящий стиль
     
     # --- Рисуем гистограмму для всего слоя (data_full) с помощью ax.bar ---
@@ -491,59 +560,64 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
         # Если бинов очень мало или нет (из-за очень узкого диапазона или пустых данных)
         bin_width_full = 1 # Или другое значение по умолчанию, может потребовать настройки
     
-    # Используем bin_edges_full[:-1] как x-координаты (левые границы бинов)
-    ax.bar(bin_edges_full[:-1], normalized_counts_full, width=bin_width_full, align='edge',
-           color='grey', edgecolor='black', alpha=0.3, label='Распределение всего слоя')
-    
-    # --- Рисуем гистограмму для данных наблюдений (data) с помощью ax.bar ---
-    if len(bin_edges_data) > 1:
-        bin_width_data = bin_edges_data[1] - bin_edges_data[0]
-    else:
-        bin_width_data = bin_width_full # Используем ту же ширину, что и для data_full
-    
-    ax.bar(bin_edges_data[:-1], normalized_counts_data, width=bin_width_data, align='edge',
-           color='skyblue', edgecolor='black', alpha=0.7, label='Частота наблюдений')
-    
-    # --- Добавляем линии для основных статистик (для data) ---
-    # Линии рисуем по исходным данным (data), а не по нормализованным counts.
-    #print(10)
-    ax.axvline(stats_data['mean'], color='red', linestyle='dashed', linewidth=1.5, label=f'Среднее ({format_float(stats_data["mean"])})')
-    ax.axvline(stats_data['median'], color='green', linestyle='dashed', linewidth=1.5, label=f'Медиана ({format_float(stats_data["median"])})')
-    ax.axvline(stats_data['p5'], color='orange', linestyle='dotted', linewidth=1)
-    ax.axvline(stats_data['p95'], color='orange', linestyle='dotted', linewidth=1, label='5%/95%')
-    #print(20)
-    
-    # --- Заголовок и подписи осей ---
-    pred_title = bio_info.get(band_name)['title']
-    axtitle = "Гистограмма отклика для предиктора:\n"+wrap_long_lines(pred_title, 100)
-    if (title != ''):
-        axtitle = axtitle + "\n" + title
-    #ax.set_title(axtitle, fontsize=12, fontweight='bold')
-    ax.set_title(axtitle, fontsize=9)
-    ax.set_ylabel('Нормализованная Частота', fontsize=10)
-    
-    xlabel_text = pred_title
-    ax.set_xlabel(xlabel_text, fontsize=7)
-    
-    # --- Улучшаем внешний вид осей ---
-    ax.tick_params(axis='both', which='major', labelsize=9)
-    ax.grid(axis='y', alpha=0.5)
-    ax.grid(axis='x', linestyle='--', alpha=0.2)
-    
-    # --- Добавляем информацию о статистике (для data) ---
-    y_pos_for_stats_data_adjusted = 0.95
     try:
-        add_stats_to_plot(ax, stats_data, stats_predictor, y_pos=y_pos_for_stats_data_adjusted, y_max_overall=total_y_max_normalized)
+        # Используем bin_edges_full[:-1] как x-координаты (левые границы бинов)
+        ax.bar(bin_edges_full[:-1], normalized_counts_full, width=bin_width_full, align='edge',
+               color='grey', edgecolor='black', alpha=0.3, label='Распределение всего слоя')
+        
+        # --- Рисуем гистограмму для данных наблюдений (data) с помощью ax.bar ---
+        if len(bin_edges_data) > 1:
+            bin_width_data = bin_edges_data[1] - bin_edges_data[0]
+        else:
+            bin_width_data = bin_width_full # Используем ту же ширину, что и для data_full
+        
+        
+        ax.bar(bin_edges_data[:-1], normalized_counts_data, width=bin_width_data, align='edge',
+               color='skyblue', edgecolor='black', alpha=0.7, label='Частота наблюдений')
+        
+        # --- Добавляем линии для основных статистик (для data) ---
+        # Линии рисуем по исходным данным (data), а не по нормализованным counts.
+        ax.axvline(stats_data['mean'], color='red', linestyle='dashed', linewidth=1.5, label=f'Среднее ({format_float(stats_data["mean"])})')
+        ax.axvline(stats_data['median'], color='green', linestyle='dashed', linewidth=1.5, label=f'Медиана ({format_float(stats_data["median"])})')
+        ax.axvline(stats_data['p5'], color='orange', linestyle='dotted', linewidth=1)
+        ax.axvline(stats_data['p95'], color='orange', linestyle='dotted', linewidth=1, label='5%/95%')
+        
+        # --- Заголовок и подписи осей ---
+        pred_title = bio_info.get(band_name).get('title')
+        if bio_info.get(band_name)['unit']!='':
+            pred_title = pred_title + ', ' + bio_info.get(band_name).get('unit')
+        axtitle = "Гистограмма отклика для предиктора:\n"+wrap_long_lines(pred_title, 100)
+        if (title != ''):
+            axtitle = axtitle + "\n" + title
+        #ax.set_title(axtitle, fontsize=12, fontweight='bold')
+        ax.set_title(axtitle, fontsize=9)
+        ax.set_ylabel('Нормализованная Частота', fontsize=10)
+        
+        xlabel_text = pred_title
+        ax.set_xlabel(xlabel_text, fontsize=7)
+        
+        # --- Улучшаем внешний вид осей ---
+        ax.tick_params(axis='both', which='major', labelsize=9)
+        ax.grid(axis='y', alpha=0.5)
+        ax.grid(axis='x', linestyle='--', alpha=0.2)
+    
+        # --- Добавляем информацию о статистике (для data) ---
+        y_pos_for_stats_data_adjusted = 0.95
+        try:
+            add_stats_to_plot(ax, stats_data, stats_predictor, y_pos=y_pos_for_stats_data_adjusted, y_max_overall=total_y_max_normalized)
+        except Exception as e:
+            print("Ошибка нанесения статистических признаков: " + str(e))
+    
+        # --- Легенда ---
+        handles, labels = ax.get_legend_handles_labels()
+        by_label = dict(zip(labels, handles))
+        ax.legend(by_label.values(), by_label.keys(), loc='upper right', fontsize=8)
+        
+        # --- Устанавливаем пределы оси Y ---
+        ax.set_ylim(0, total_y_max_normalized * 1.4)
+    
     except Exception as e:
-        print("Ошибка нанесения статистических признаков: " + str(e))
-    
-    # --- Легенда ---
-    handles, labels = ax.get_legend_handles_labels()
-    by_label = dict(zip(labels, handles))
-    ax.legend(by_label.values(), by_label.keys(), loc='upper right', fontsize=8)
-    
-    # --- Устанавливаем пределы оси Y ---
-    ax.set_ylim(0, total_y_max_normalized * 1.4)
+        print("Ошибка построения гистограммы: " + str(e))
     
     return stats_data, stats_predictor
 

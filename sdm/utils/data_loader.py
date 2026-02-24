@@ -118,6 +118,7 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     # здесь где-то перепутаны координаты!!!
     MONTH_COL = ''
     if 'year' in df.columns:
+        #df_coord_filtered = df[df['year']>1980]
         df_coord_filtered = df[df['year']>2010]
         
         df_coord_filtered = df_coord_filtered[df_coord_filtered[LAT_COL]>IN_MIN_LON]
@@ -162,22 +163,25 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     return {'LAT_COL': LAT_COL, 'LON_COL': LON_COL, 'df': df, 'occ': occ, 'status': 'done', 'species': species}
 
 
-def load_environmental_predictors(raster_dir, predictors = 'all', period='current', scales='', bio_info=''):
+def load_environmental_predictors(raster_dir, predictors = 'all', period='current', interval='', scales='', bio_info=''):
     """Считывает все GeoTIFF из папки и строит стек (bands, H, W).
        Возвращает: stack(float32), valid_mask(bool), transform, crs, profile, band_names(list)"""
     
     # У нас предикторы делятся на статические и динамические.
     # Для моделирования настоящего - объединяем их.
     static_subdir = os.path.join(raster_dir, "static")
-    if period=='current':
+    if period =='current':
         dynamic_subdir = os.path.join(raster_dir, "dynamic_current")
-    else:
-        dynamic_subdir = os.path.join(raster_dir, "dynamic_predictable/"+period)
+    if period == 'future':
+        dynamic_subdir = os.path.join(raster_dir, "dynamic_predictable/"+interval)
+        # важно, чтобы все предикторы для будущего назывались аналогично настоящему
+    if period == 'monthly':
+        dynamic_subdir = os.path.join(raster_dir, "dynamic_monthly/"+str(interval))
     
     # Собираем файлы из подпапки "static"
     static_tifs = glob.glob(os.path.join(static_subdir, "*.tif"))
     
-    # Собираем файлы из подпапки "dynamic_current"
+    # Собираем файлы из подпапки динамичных подпапок
     dynamic_tifs = glob.glob(os.path.join(dynamic_subdir, "*.tif"))
     
     # Объединяем оба списка
@@ -189,20 +193,12 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
     print(f"Статические предикторы: {static_subdir}")
     print(f"Динамические предикторы: {dynamic_subdir}")
     
-    #print('----------------')
-    #print('Все предикторы:')
-    #print(all_available_tifs)
-    #print('Нужные предикторы:')
-    #print(predictors)
-    #print('----------------')
-    
     # фильтруем по входящему списку предикторов
     if predictors.strip().lower() == 'all':
         # Если 'all', используем все найденные файлы
         desired_filenames_no_ext = [os.path.splitext(os.path.basename(f))[0] for f in all_available_tifs]
         desired_tifs_ordered = all_available_tifs # Изначальный порядок из glob
     else:
-        
         # Создаем список желаемых имен файлов (без .tif)
         predictor_names_no_ext = [p.strip() for p in predictors.split(',')]
         
@@ -212,6 +208,7 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
         # Фильтруем все доступные файлы, чтобы остались только те, что в списке ожидаемых
         # и сохраняем их в порядке, заданном в predictors
         desired_tifs_ordered = []
+        not_found_tifs = []
         
         for expected_filename in expected_full_filenames:
             found = False
@@ -221,8 +218,48 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
                     desired_tifs_ordered.append(available_file_path)
                     found = True
                     break # Переходим к следующему ожидаемому файлу
+                
+                if period == 'future':
+                    # хак для разных имён файлов предикторов CHELSA
+                    subrep = os.path.basename(available_file_path)
+                    subrep = subrep.replace('_mpi-esm1-2-hr_', '')
+                    subrep = subrep.replace('ssp126', '')
+                    subrep = subrep.replace('ssp370', '')
+                    subrep = subrep.replace('ssp585', '')
+                    subrep = subrep.replace(interval.split('/')[0], '1981-2010')
+                    #print('interval: '+interval.split('/')[0])
+                    #print('in:  '+os.path.basename(available_file_path))
+                    #print('rep: '+subrep)
+                    #print('exp: '+expected_filename)
+                    
+                    if subrep == expected_filename:
+                        desired_tifs_ordered.append(available_file_path)
+                        found = True
+                        break
+            if found == False:
+                not_found_tifs.append(expected_filename)
+                
+        if period == 'monthly': # добавим помесячные предикторы
+            for path in dynamic_tifs:
+                desired_tifs_ordered.append(path)
     
+        
     tifs = desired_tifs_ordered
+    
+    if False:
+        print('----------------')
+        print('Доступные предикторы:')
+        print(all_available_tifs)
+        print('Нужные предикторы:')
+        print(predictors)
+        print('Загруженные предикторы:')
+        print(tifs)
+        print('Не найденные предикторы:')
+        print(not_found_tifs)
+        print('----------------')
+    if len(not_found_tifs)>0:
+        print('Не найденные предикторы:')
+        print(not_found_tifs)
     
     
     if not tifs:
@@ -236,7 +273,7 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
     ref_width = ref_height = None
     ref_crs = None
     
-    # создаём jpg для каждого слоя
+    # создаём jpg для каждого слоя, если заданы масштабы (=для текущего периода)
     if scales:
         for i, fp in enumerate(tifs):
             fpjpg = fp.replace('.tif', '.jpg')
@@ -244,15 +281,18 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
             
             if not os.path.exists(fpjpg):
                 band = os.path.splitext(os.path.basename(fp))[0]
-                mean = scales[band]['mean']
-                sc = scales[band]['scale']
+                if scales.get(band):
+                    mean = scales[band]['mean']
+                    sc = scales[band]['scale']
+                else:
+                    mean = 0
+                    sc = 1
                 plot_geotiff_with_osm(fp, fpjpg, mean, sc, band, bio_info)
-            
     
     for i, fp in enumerate(tifs):
         with rasterio.open(fp) as ds:
             arr = ds.read(1, masked=True).astype("float32")  # masked -> маскирует nodata
-            arr = np.ma.filled(arr, np.nan)                  # превращаем masked в np.nan
+            #arr = np.ma.filled(arr, np.nan)                  # превращаем masked в np.nan
             if i == 0:
                 ref_transform = ds.transform
                 ref_width, ref_height = ds.width, ds.height
@@ -265,6 +305,7 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
                     raise ValueError(f"Растр {fp} имеет другой CRS: {ds.crs} vs {ref_crs}")
             band_arrays.append(arr)
             band_names.append(os.path.splitext(os.path.basename(fp))[0])
+    
     stack = np.stack(band_arrays, axis=0)  # shape: (bands, H, W)
     # Маска валидных пикселей: валиден, если нет NaN во всех слоях
     #valid_mask = np.all(~np.isnan(stack), axis=0)
@@ -272,6 +313,10 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
     # Решил на данный момент отключить маску валидности.
     valid_mask = np.ones(stack.shape[1:], dtype=bool)
     # Профиль для сохранения результата
+    
+    #print('Форма растров: ')
+    #print(stack.shape)
+    
     profile = {
         "driver": "GTiff",
         "height": ref_height,
@@ -283,6 +328,7 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
         "compress": "lzw",
         "nodata": np.nan
     }
+    
     return stack, valid_mask, ref_transform, ref_crs, profile, band_names, band_paths
 
 
