@@ -271,6 +271,11 @@ def format_float(value: float) -> str:
     return f"{value:.4f}".rstrip('0').rstrip('.')
 
 
+def save_error(error_path, text):
+    with open(error_path, 'w') as f: # записываем файл
+        f.write(str(text))
+
+
 def save_geotiff(output_path, array2d, profile):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     prof = profile.copy()
@@ -465,4 +470,4 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
         with open(text_filename, 'a') as f:
             f.write(f"\n{len(rows_random)},{len(rows_buffer)}")
     
-    return all_rows, all_cols
+    return all_rows, all_cols, rows_random, cols_random, rows_buffer, cols_buffer

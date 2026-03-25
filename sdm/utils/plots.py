@@ -19,6 +19,20 @@ from .utils import get_predictor_stats, format_float, calculate_histogram_simila
 from .utils import read_and_to_3857, round_to_significant_figures, wrap_long_lines
 
 
+def plot_roc_auc_curve(fpr, tpr, auc, auc_path):
+    plt.figure(figsize=(8, 6))
+    plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (AUC = {auc:.3f})')
+    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', label='Случайное угадывание') # Случайное угадывание
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel('Ложные позитивные')
+    plt.ylabel('Истинные позитивные')
+    plt.title('ROC-кривая')
+    plt.legend(loc="lower right")
+    plt.grid(True)
+    #plt.show()
+    
+    plt.savefig(auc_path, dpi=200) # quality=90 - не найден такой параметр
 
 
 def create_avi_from_images(image_paths, output_mp4_path='output.mp4', fps=1):

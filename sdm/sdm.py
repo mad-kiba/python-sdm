@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, roc_curve, confusion_matrix, cohen_kappa_score
 from rasterio.transform import xy
 from sklearn.calibration import CalibratedClassifierCV
 #import libpysal - нужно для расчётов Moran's I, сейчас не используется
@@ -23,24 +23,43 @@ from sklearn.calibration import CalibratedClassifierCV
 from .utils.preprocessing import clip_rasters, points_to_pixel_indices, pixel_indices_to_points
 from .utils.data_loader import load_species_occurrence_data, load_environmental_predictors
 from .utils.utils import sample_background, extract_features_from_stack, inverse_scale
-from .utils.utils import save_geotiff, predict_suitability_for_stack
-from .utils.plots import create_beautiful_histogram, draw_map, create_animated_gif, create_avi_from_images
+from .utils.utils import save_geotiff, predict_suitability_for_stack, save_error
+from .utils.plots import create_beautiful_histogram, draw_map, create_animated_gif, create_avi_from_images, plot_roc_auc_curve
 from .utils.models import MaxEnt
 from .utils.predictors_info import get_predictors_info
 
 class PythonSDM:
     def __init__(self, config):
         
-        for attribute_name, attribute_value in config.items():
+        for attribute_name, attribute_value in config.items(): # заполняем входящие параметры
             setattr(self, attribute_name, attribute_value)
-        
-        
-        print(f"-- Регион для моделирования ({self.IN_ID}): ")
-        print("("+str(self.IN_MIN_LAT)+","+str(self.IN_MIN_LON)+"), ("+str(self.IN_MAX_LAT)+","+str(self.IN_MAX_LON)+"), step: "+self.IN_RESOLUTION)
-        
+            
+            
+        # для запуска в многопоточном режиме
+        j = self.JOBS.get(self.IN_ID)
+        self.ERROR_FILENAME = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_error.txt'
+        if not j:
+            self.JOBS[self.IN_ID] = {'status': 'queued', 'file': None, 'error': None}
+            
+            
+        # если нулевые параметры - это запрос на данные из старого расчёта
         if self.IN_MIN_LAT==0 and self.IN_MAX_LAT==0:
-            self.JOBS[self.IN_ID]['status'] = 'done'
-            return {'result': 'Ok', 'code': 200}
+            #print('Get old query: ' + str(self.IN_ID))
+            if os.path.exists(self.ERROR_FILENAME):
+                with open(self.ERROR_FILENAME, 'r', encoding='utf-8') as file:
+                    file_content = file.read()
+                    print('Ошибка:' + file_content)
+                    self.JOBS[self.IN_ID]['status'] = 'error'
+                    self.JOBS[self.IN_ID]['error'] = file_content
+                    return {'status': 'error', 'error': file_content, 'code': 401}
+            else:
+                self.JOBS[self.IN_ID]['status'] = 'done'
+                return {'result': 'Ok', 'code': 200}
+        else:
+            print(f"-- Регион для моделирования ({self.IN_ID}): ")
+            print("("+str(self.IN_MIN_LAT)+","+str(self.IN_MIN_LON)+"), ("+str(self.IN_MAX_LAT)+","+str(self.IN_MAX_LON)+"), step: "+self.IN_RESOLUTION)
+        
+        
         
         self.RANDOM_SEED = 42
         
@@ -50,6 +69,8 @@ class PythonSDM:
         self.OUTPUT_PREDICTIONS_DIR = "output/predictions"
         self.OUTPUT_PAST_DIR = "output/past"
         self.OUTPUT_SEASONS_DIR = "output/seasons"
+        
+        self.OUTPUT_ROC_AUC_JPG = "output/aucs/"+str(self.IN_ID)+'/roc-auc.jpg'
         
         self.OUTPUT_FUTURE_DIR = os.path.join(self.OUTPUT_PREDICTIONS_DIR, str(self.IN_ID))
         self.OUTPUT_PAST_DIR = os.path.join(self.OUTPUT_PAST_DIR, str(self.IN_ID))
@@ -75,6 +96,7 @@ class PythonSDM:
         np.random.seed(self.RANDOM_SEED)
         
         self.TEXT_FILENAME = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'.txt'
+        self.ERROR_FILENAME = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_error.txt'
         self.PRED_FILENAME = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_pred.txt'
         #self.STACK_FILENAME = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_stack.txt' # больше не нужно
         self.MONTH_FILENAME = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_month.txt'
@@ -84,15 +106,13 @@ class PythonSDM:
         self.GISTO_STATS = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_gistos.js'
         self.FUTURE_SUITS = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_futures.js'
         
+        
+        
         os.makedirs('output/texts/'+str(self.IN_ID)+'/', exist_ok=True)
         os.makedirs('output/suitability/'+str(self.IN_ID)+'/', exist_ok=True)
+        os.makedirs('output/aucs/'+str(self.IN_ID)+'/', exist_ok=True)
         
         self.bio_info = get_predictors_info()
-        
-        # для запуска в многопоточном режиме
-        j = self.JOBS.get(self.IN_ID)
-        if not j:
-            self.JOBS[self.IN_ID] = {'status': 'queued', 'file': None, 'error': None}
     
     
     def prepare_predictors(self):
@@ -114,10 +134,11 @@ class PythonSDM:
             ret = load_species_occurrence_data(self.IN_ID, self.IN_CSV, self.IN_CSV_ADDITIONAL,
                                                self.CSV_FILENAME, self.CSV_FILENAME_ADD, self.CSV_FILTERED_FILENAME,
                                                self.MONTH_FILENAME, self.TEXT_FILENAME,
-                                               self.IN_MIN_LON, self.IN_MIN_LAT, self.IN_MAX_LON, self.IN_MAX_LAT, self.JOBS)
+                                               self.IN_MIN_LON, self.IN_MIN_LAT, self.IN_MAX_LON, self.IN_MAX_LAT)
         except Exception as e:
             # если не будут возвращаться тексты ошибок исключений, раскомментировать две строчки ниже:
             print(e)
+            save_error(self.ERROR_FILENAME, e)
             return {'status': 'terminated', 'error': str(e), 'code': 401}
         
         self.LAT_COL = ret['LAT_COL']
@@ -148,8 +169,8 @@ class PythonSDM:
             self.bands, self.H, self.W = self.stack.shape
         except Exception as e:
             print(e)
+            save_error(self.ERROR_FILENAME, e)
             return {'status': 'terminated', 'error': str(e), 'code': 401}
-        
         
         print(f"\n-- Загружено предикторов: {self.bands} | Размер: {self.H} x {self.W} | CRS: {self.crs}")
         print("Слои:", self.band_names)
@@ -196,6 +217,7 @@ class PythonSDM:
         
         if len(rows)<10 and month=='':
             print('Not enough points in region')
+            save_error(self.ERROR_FILENAME, f"Внутри области моделирования недостаточно точек. Должно быть не менее 10, сейчас: {len(rows)}.")
             return {'status': 'terminated', 'error': f"Внутри области моделирования недостаточно точек. Должно быть не менее 10, сейчас: {len(rows)}.", 'code': 401}
         
         # 4.1) создаём полные растры для всего спектра слоёв-предикторов
@@ -233,6 +255,7 @@ class PythonSDM:
         
         if n_presence<5 and month==0:
             print('Not enough unique points in region')
+            save_error(self.ERROR_FILENAME, f"Внутри области моделирования очень мало уникальных присутствий. Должно быть не менее 5, сейчас: {n_presence}.")
             return {'status': 'terminated', 'error': f"Внутри области моделирования очень мало уникальных присутствий. Должно быть не менее 5, сейчас: {n_presence}.", 'code': 401}
         
         self.rows_coord, self.cols_coord, inside = pixel_indices_to_points(rows_p, cols_p, self.transform, self.W, self.H)
@@ -309,7 +332,8 @@ class PythonSDM:
         rng = np.random.default_rng(self.RANDOM_SEED)
         n_bg = min(self.MAX_BG, self.BG_MULT * self.n_presence)
         
-        self.rows_bg, self.cols_bg = sample_background(self.valid_mask, set(map(tuple, self.pres_rc)), n_bg,
+        self.rows_bg, self.cols_bg, self.rows_random, self.cols_random, self.rows_buffer, self.cols_buffer = sample_background(self.valid_mask,
+                                                       set(map(tuple, self.pres_rc)), n_bg,
                                                        rng, self.BG_PC, self.BG_DISTANCE_MIN, self.BG_DISTANCE_MAX,
                                                        self.TEXT_FILENAME, month)
                 
@@ -457,6 +481,7 @@ class PythonSDM:
                 )
         except Exception as e:
             print(e)
+            save_error(self.ERROR_FILENAME, e)
             return {'status': 'terminated', 'error': str(e), 'code': 401}
             
         
@@ -469,33 +494,65 @@ class PythonSDM:
                 max_depth=10
             )
             self.model.fit(self.X_train, self.y_train)
+        
+        try:
+            if (self.IN_MODEL=='XGBoost'):
+                self.model = xgb.XGBClassifier(
+                    objective='binary:logistic',
+                    n_estimators=500,        # Количество деревьев
+                    learning_rate=0.05,      # Скорость обучения
+                    max_depth=10,             # Максимальная глубина деревьев
+                    subsample=0.8,           # Доля объектов для обучения каждого дерева
+                    colsample_bytree=0.8,    # Доля признаков для обучения каждого дерева
+                    random_state=self.RANDOM_SEED,
+                    n_jobs=-1,               # Использовать все доступные ядра CPU
+                    eval_metric='auc',
+                    tree_method='hist'       # Хорошо работает с большими данными
+                )
+                
+                self.model.fit(self.X_train, self.y_train)
+        except Exception as e:
+            print('Ошибка обучения')
+            print(e)
             
-        if (self.IN_MODEL=='XGBoost'):
-            self.model = xgb.XGBClassifier(
-                objective='binary:logistic',
-                n_estimators=500,        # Количество деревьев
-                learning_rate=0.05,      # Скорость обучения
-                max_depth=10,             # Максимальная глубина деревьев
-                subsample=0.8,           # Доля объектов для обучения каждого дерева
-                colsample_bytree=0.8,    # Доля признаков для обучения каждого дерева
-                random_state=self.RANDOM_SEED,
-                n_jobs=-1,               # Использовать все доступные ядра CPU
-                eval_metric='auc',
-                tree_method='hist'       # Хорошо работает с большими данными
-            )
+        print('Обучение завершено')
+        
+        try:
+            # вычисление ROC-AUC
+            y_prob = self.model.predict_proba(self.X_test)[:, 1]
             
-            self.model.fit(self.X_train, self.y_train)
+            self.auc = roc_auc_score(self.y_test, y_prob)
+            print(f"ROC AUC (holdout): {self.auc:.3f}")
+            
+            # строим график ROC-AUC
+            fpr, tpr, thresholds = roc_curve(self.y_test, y_prob)
+            plot_roc_auc_curve(fpr, tpr, self.auc, self.OUTPUT_ROC_AUC_JPG)
+            
+            # вычисление других метрик
+            threshold = 0.5
+            y_pred = (y_prob >= threshold).astype(int)
+            cm = confusion_matrix(self.y_test, y_pred)
+            TN, FP, FN, TP = cm.ravel()
+            self.auc = roc_auc_score(self.y_test, y_prob)
+            self.kappa = cohen_kappa_score(self.y_test, y_pred)
+            
+            sensitivity = TP / (TP + FN) if (TP + FN) > 0 else 0
+            specificity = TN / (TN + FP) if (TN + FP) > 0 else 0
+            
+            self.tss = sensitivity + specificity - 1
+            
+            print(f"TSS: {self.tss:.4f}")
+            print(f"Cohen's Kappa: {self.kappa:.4f}")
+            
+            
+        except Exception as e:
+            print('Ошибка оценки качества модели')
+            print(e)
         
-        y_prob = self.model.predict_proba(self.X_test)[:, 1]
-        
-        self.auc = roc_auc_score(self.y_test, y_prob)
-        print(f"ROC AUC (holdout): {self.auc:.3f}")
-        
-        
-        # Если это основной прогон - записываем auc
+        # Если это основной прогон - записываем метрики
         if month==0:
             with open(self.TEXT_FILENAME, 'a') as f:
-                f.write(f"\n{self.auc:.3f}")
+                f.write(f"\n{self.auc:.3f},{self.tss:.3f},{self.kappa:.3f}")
                 
                 if self.species!='':
                     title = self.species
@@ -520,7 +577,7 @@ class PythonSDM:
     def predict_current(self, month = 0):
         # 11) Прогноз на всю область и сохранение карты пригодности
         print(f"\n-- 11. Прогноз на всю область и сохранение карты пригодности ({self.IN_ID})")
-
+        
         self.suitability = predict_suitability_for_stack(self.model, self.stack, self.valid_mask, batch_size=500_000)
         
         if (month!=0):
@@ -537,8 +594,14 @@ class PythonSDM:
         mask_high_suitability05 = self.suitability > 0.05
         hi_sui05 = np.sum(mask_high_suitability05)
         
+        mask_high_suitability25 = self.suitability > 0.25
+        hi_sui25 = np.sum(mask_high_suitability25)
+        
         mask_high_suitability50 = self.suitability > 0.5
         hi_sui50 = np.sum(mask_high_suitability50)
+        
+        mask_high_suitability75 = self.suitability > 0.75
+        hi_sui75 = np.sum(mask_high_suitability75)
         
         mask_high_suitability95 = self.suitability > 0.95
         hi_sui95 = np.sum(mask_high_suitability95)
@@ -546,16 +609,29 @@ class PythonSDM:
         if month==0:
             with open(self.TEXT_FILENAME, 'a') as f:
                 f.write(f"\nCHS05:{hi_sui05}")
+                f.write(f"\nCHS25:{hi_sui25}")
                 f.write(f"\nCHS50:{hi_sui50}")
+                f.write(f"\nCHS75:{hi_sui75}")
                 f.write(f"\nCHS95:{hi_sui95}")
         
-        # (Опционально) можно сохранить также использованные точки присутствия в пиксельных координатах
-        # или вернуть их центры в географических координатах:
+        # Сохраним использованные точки присутствия в географических координатах:
         xs, ys = xy(self.transform, self.rows_p, self.cols_p, offset="center")
-        used_occ_df = pd.DataFrame({"lon": xs, "lat": ys})
+        used_occ_df = pd.DataFrame({"decimalLongitude": xs, "decimalLatitude": ys})
         used_occ_df.to_csv(os.path.join(os.path.dirname(self.OUTPUT_SUITABILITY_TIF),
                                         "used_presences_"+str(self.IN_ID)+".csv"), index=False)
         print("Сохранены использованные присутствия (уникальные по пикселю): used_presences_"+str(self.IN_ID)+".csv")
+        
+        xs, ys = xy(self.transform, self.rows_random, self.cols_random, offset="center")
+        used_rand_df = pd.DataFrame({"decimalLongitude": xs, "decimalLatitude": ys})
+        used_rand_df.to_csv(os.path.join(os.path.dirname(self.OUTPUT_SUITABILITY_TIF),
+                                        "used_randoms_"+str(self.IN_ID)+".csv"), index=False)
+        print("Сохранены использованные присутствия (уникальные по пикселю): used_randoms_"+str(self.IN_ID)+".csv")
+        
+        xs, ys = xy(self.transform, self.rows_buffer, self.cols_buffer, offset="center")
+        used_buff_df = pd.DataFrame({"decimalLongitude": xs, "decimalLatitude": ys})
+        used_buff_df.to_csv(os.path.join(os.path.dirname(self.OUTPUT_SUITABILITY_TIF),
+                                        "used_buffer_"+str(self.IN_ID)+".csv"), index=False)
+        print("Сохранены использованные присутствия (уникальные по пикселю): used_buffer_"+str(self.IN_ID)+".csv")
     
     
     def calculate_moransi(self):
@@ -633,15 +709,21 @@ class PythonSDM:
             mask_high_suitability05 = self.suitability > 0.05
             hi_sui05 = np.sum(mask_high_suitability05)
             
+            mask_high_suitability25 = self.suitability > 0.25
+            hi_sui25 = np.sum(mask_high_suitability25)
+            
             mask_high_suitability50 = self.suitability > 0.5
             hi_sui50 = np.sum(mask_high_suitability50)
+            
+            mask_high_suitability75 = self.suitability > 0.75
+            hi_sui75 = np.sum(mask_high_suitability75)
             
             mask_high_suitability95 = self.suitability > 0.95
             hi_sui95 = np.sum(mask_high_suitability95)
             try:
                 future_stats = {}
                 future_stats['1981-2010'] = []
-                future_stats['1981-2010'].append({'n05': hi_sui05, 'n50': hi_sui50, 'n95': hi_sui95})
+                future_stats['1981-2010'].append({'n05': hi_sui05, 'n50': hi_sui50, 'n95': hi_sui95, 'n25': hi_sui25, 'n75': hi_sui75})
             except Exception as e:
                 print('Ошибка')
                 print(str(e))
@@ -682,8 +764,14 @@ class PythonSDM:
                         mask_high_suitability05 = suitability_f > 0.05
                         hi_sui05 = np.sum(mask_high_suitability05)
                         
+                        mask_high_suitability25 = suitability_f > 0.25
+                        hi_sui25 = np.sum(mask_high_suitability25)
+                        
                         mask_high_suitability50 = suitability_f > 0.5
                         hi_sui50 = np.sum(mask_high_suitability50)
+                        
+                        mask_high_suitability75 = suitability_f > 0.75
+                        hi_sui75 = np.sum(mask_high_suitability75)
                         
                         mask_high_suitability95 = suitability_f > 0.95
                         hi_sui95 = np.sum(mask_high_suitability95)
@@ -700,7 +788,7 @@ class PythonSDM:
                             future_stats[scenario] = []
                         
                         future_imgs[scenario].append(out_path_img)
-                        future_stats[scenario].append({'n05': hi_sui05, 'n50': hi_sui50, 'n95': hi_sui95})
+                        future_stats[scenario].append({'n05': hi_sui05, 'n50': hi_sui50, 'n95': hi_sui95, 'n75': hi_sui75, 'n25': hi_sui25})
                         
                         if period=='2071-2100': # дублируем последний слайд, чтобы была пауза в анимации
                             future_imgs[scenario].append(out_path_img)
@@ -796,6 +884,7 @@ class PythonSDM:
                     self.draw_map_current(month)
             except Exception as e:
                 print(e)
+                save_error(self.ERROR_FILENAME, e)
                 return {'status': 'terminated', 'error': str(e), 'code': 401}
             
             

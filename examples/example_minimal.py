@@ -22,7 +22,9 @@ config = {
         'IN_MAX_LAT': 90.0,
         'IN_MAX_LON': 56.0,
         'IN_RESOLUTION': '30s',
-        'MODEL_FUTURE': 1, # 0 = не прогнозируем будущее
+        'MODEL_FUTURE': 0, # 0 = не прогнозируем будущее
+        'MODEL_SEASON': 0, # 0 = не делаем помесячный прогноз
+        'MODEL_PAST': 0, # 0 = не прогнозируем прошлое
         'IN_MODEL': 'XGBoost',
         #'IN_MODEL': 'MaxEnt',
         'BG_MULT': 20,
@@ -31,7 +33,6 @@ config = {
         'BG_DISTANCE_MAX': 0, # указывается в шагах сетки
         #'DO_GISTO': 1, # нужно ли рисовать гистограммы
         'DO_GISTO': 0,
-        'DO_SEASON': 0,
         'SCENARIOS': 'all',
         'JOBS': {}
 }

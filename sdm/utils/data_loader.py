@@ -27,7 +27,7 @@ def load_occurrences(df, lon_col, lat_col, month_col=''):
 
 def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME, CSV_FILENAME_ADD,
                                 CSV_FILTERED_FILENAME, MONTH_FILENAME, TEXT_FILENAME,
-                                IN_MIN_LON, IN_MIN_LAT, IN_MAX_LON, IN_MAX_LAT, jobs):
+                                IN_MIN_LON, IN_MIN_LAT, IN_MAX_LON, IN_MAX_LAT):
     
     try:
         if (os.path.isfile(IN_CSV)): # если это путь к файлу, читаем файл, иначе считаем дампом csv
@@ -140,6 +140,8 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
             counts_dict = monthly_counts.to_dict()
             with open(MONTH_FILENAME, 'w', encoding='utf-8') as f:
                 json.dump(counts_dict, f, ensure_ascii=False, indent=4) # indent=4 для читаемости
+    else:
+        df_coord_filtered = df
     
     # 2.3) финальные присустсвия
     print(f"-- 2.3. Финальные присутствия ({IN_ID})")
@@ -193,6 +195,9 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
     print(f"Статические предикторы: {static_subdir}")
     print(f"Динамические предикторы: {dynamic_subdir}")
     
+    desired_tifs_ordered = []
+    not_found_tifs = []
+    
     # фильтруем по входящему списку предикторов
     if predictors.strip().lower() == 'all':
         # Если 'all', используем все найденные файлы
@@ -207,8 +212,6 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
         
         # Фильтруем все доступные файлы, чтобы остались только те, что в списке ожидаемых
         # и сохраняем их в порядке, заданном в predictors
-        desired_tifs_ordered = []
-        not_found_tifs = []
         
         for expected_filename in expected_full_filenames:
             found = False
