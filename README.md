@@ -29,6 +29,8 @@ apt install python3 python3-pip libxcb1 libgl1 # Ubuntu, Debian
 pip install pandas geopandas matplotlib scikit-learn xgboost opencv-python rasterio contextily pyproj shapely osmnx
 ```
 
+Дальше собираем исходные данные для запуска библиотеки - слои-предикторы и наблюдательные данные:
+
 4. Создать папку `python_sdm\input_predictors` для предикторов. В ней может быть до четырёх подпапок:
 - `python_sdm\input_predictors\static` - предикторы в этой папке считаются статическими, неизменными по времени. Соответственно, модель может их использовать и для текущего времени, и для будущего (например, высота над уровнем моря - WorldClim height);
 - `python_sdm\input_predictors\dynamic_current` - предикторы в этой папке считаются динамическими (например, WorldClim BIOxx). Если вы моделируете будущее, файлы с аналогичным названием должны лежать в следующей папке:
