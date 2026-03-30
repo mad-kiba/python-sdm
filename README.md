@@ -19,11 +19,17 @@ Species Distribution Modelling (SDM) library for Python.
 1. Скачать библиотеку и набор предикторов в отдельную папку.
 2. Установить Python:
 ```
-yum install python3 python3-pip # CentOS, RHEL
+yum install python3 python3-pip libxcb mesa-libGL # CentOS, RHEL
 # или
-apt install python3 python3-pip # Ubuntu, Debian
+apt install python3 python3-pip libxcb1 libgl1 # Ubuntu, Debian
 ```
 3. Установить дополнительные библиотеки:
 ```
-pip install 
+pip install pandas geopandas matplotlib scikit-learn xgboost opencv-python rasterio contextily pyproj shapely osmnx
 ```
+
+4. Создать папку `input_predictors` для предикторов. В ней может быть до четырёх подпапок:
+- `static` - предикторы в этой папке считаются статическими, неизменными по времени. Соответственно, модель может их использовать и для текущего времени, и для будущего (например, высота над уровнем моря - WorldClim height);
+- `dynamic_current` - предикторы в этой папке считаются динамическими (например, WorldClim BIOxx). Если вы моделируете будущее, файлы с аналогичным названием должны лежать в следующей папке:
+- `dynamic_predictable` - в этой папке лежат предикторы будущего (например, WorldClim BIOxx SSP370);
+- `dynamic_past` - в этой папке лежат предикторы прошлого (например, CHELSA TraCE21k).
