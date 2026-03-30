@@ -15,7 +15,7 @@ Species Distribution Modelling (SDM) library for Python.
 Модель можно запустить здесь и сейчас: птицы, млекопитающие, рептилии, насекомые, растения - пробуйте всё. Адрес: https://wingeds.world/sdm
 
 # Установка и запуск локальной версии
-Для запуска Python-SDM локально нужно:
+**Для запуска Python-SDM локально нужно:**
 1. Скачать библиотеку в отдельную папку, например, `python_sdm`.
    
 2. Установить Python:
@@ -29,7 +29,8 @@ apt install python3 python3-pip libxcb1 libgl1 # Ubuntu, Debian
 pip install pandas geopandas matplotlib scikit-learn xgboost opencv-python rasterio contextily pyproj shapely osmnx
 ```
 
-Дальше собираем исходные данные для запуска библиотеки - слои-предикторы и наблюдательные данные:
+**Технически библиотека готова к запуску. 
+Дальше собираем исходные данные: слои-предикторы и наблюдательные данные:**
 
 4. Создать папку `python_sdm\input_predictors` для предикторов. В ней может быть до четырёх подпапок:
 - `python_sdm\input_predictors\static` - предикторы в этой папке считаются статическими, неизменными по времени. Соответственно, модель может их использовать и для текущего времени, и для будущего (например, высота над уровнем моря - WorldClim height);
