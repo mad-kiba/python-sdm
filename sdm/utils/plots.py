@@ -19,7 +19,7 @@ from .utils import get_predictor_stats, format_float, calculate_histogram_simila
 from .utils import read_and_to_3857, round_to_significant_figures, wrap_long_lines
 
 
-def plot_roc_auc_curve(fpr, tpr, auc, auc_path):
+def plot_roc_auc_curve(fpr, tpr, auc, auc_path): # постройка кривой ROC-AUC
     plt.figure(figsize=(8, 6))
     plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (AUC = {auc:.3f})')
     plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', label='Случайное угадывание') # Случайное угадывание
@@ -35,7 +35,7 @@ def plot_roc_auc_curve(fpr, tpr, auc, auc_path):
     plt.savefig(auc_path, dpi=200) # quality=90 - не найден такой параметр
 
 
-def create_avi_from_images(image_paths, output_mp4_path='output.mp4', fps=1):
+def create_avi_from_images(image_paths, output_mp4_path='output.mp4', fps=1): # создание видео AVI из картинок
     """
     Создает видеофайл AVI из массива путей к четырем изображениям.
 

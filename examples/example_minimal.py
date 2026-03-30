@@ -15,7 +15,6 @@ config = {
         #'IN_CSV': 'data/Corvus_Corvus_cornix.csv',
         'IN_CSV': 'data/falco_peregrinus.csv',
         'IN_CSV_ADDITIONAL': '',
-        #'IN_CSV': 'data/null.csv',
         'PREDICTORS': 'all', # используем все доступные предикторы
         'IN_MIN_LAT': 78.0,
         'IN_MIN_LON': 50.0,
@@ -54,5 +53,7 @@ sdm_instance.predict_current()          #11) предсказание на те�
 sdm_instance.draw_map_current()         #12) отрисовка текущей карты
 sdm_instance.predict_future()           #13) предсказание на будущем временном периоде
 sdm_instance.predict_monthly()          #14) помесячная SDM
+
+print('Моделирование завершено')
 
 

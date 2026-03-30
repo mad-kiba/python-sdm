@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import roc_auc_score, roc_curve, confusion_matrix, cohen_kappa_score
+from sklearn.metrics import roc_auc_score, roc_curve, confusion_matrix, cohen_kappa_score, accuracy_score, f1_score, precision_score
 from rasterio.transform import xy
 from sklearn.calibration import CalibratedClassifierCV
 #import libpysal - нужно для расчётов Moran's I, сейчас не используется
@@ -23,7 +23,7 @@ from sklearn.calibration import CalibratedClassifierCV
 from .utils.preprocessing import clip_rasters, points_to_pixel_indices, pixel_indices_to_points
 from .utils.data_loader import load_species_occurrence_data, load_environmental_predictors
 from .utils.utils import sample_background, extract_features_from_stack, inverse_scale
-from .utils.utils import save_geotiff, predict_suitability_for_stack, save_error
+from .utils.utils import save_geotiff, predict_suitability_for_stack, save_error, get_geotiff_square
 from .utils.plots import create_beautiful_histogram, draw_map, create_animated_gif, create_avi_from_images, plot_roc_auc_curve
 from .utils.models import MaxEnt
 from .utils.predictors_info import get_predictors_info
@@ -106,8 +106,17 @@ class PythonSDM:
         self.GISTO_STATS = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_gistos.js'
         self.FUTURE_SUITS = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_futures.js'
         
+        # создаём корневые папки для результатов моделирования
+        os.makedirs('output/texts/', exist_ok=True)
+        os.makedirs('output/suitability/', exist_ok=True)
+        os.makedirs('output/aucs/', exist_ok=True)
+        os.makedirs('output/gistos/', exist_ok=True)
+        os.makedirs('output/predictions/', exist_ok=True)
+        os.makedirs('output/past/', exist_ok=True)
+        os.makedirs('output/seasons/', exist_ok=True)
+        os.makedirs('output/predictors_jpegs/', exist_ok=True)
         
-        
+        # создаём папки для результатов этой модели
         os.makedirs('output/texts/'+str(self.IN_ID)+'/', exist_ok=True)
         os.makedirs('output/suitability/'+str(self.IN_ID)+'/', exist_ok=True)
         os.makedirs('output/aucs/'+str(self.IN_ID)+'/', exist_ok=True)
@@ -149,14 +158,21 @@ class PythonSDM:
         
         self.source_occ = ret['occ']
         self.species = ret['species']
+        self.kingdom = ret['kingdom']
+        self.dclass = ret['dclass']
     
     
     def load_predictors(self, period = 'current', month = ''):
         # 3) Загрузка стека предикторов
         print(f"\n-- 3. Загрузка предикторов ({self.IN_ID})")
         try:
-            with open(self.SCALES_FILE, 'r') as f:
-                self.scales_config = json.load(f)
+            if os.path.exists(self.SCALES_FILE):
+                with open(self.SCALES_FILE, 'r') as f:
+                    self.scales_config = json.load(f)
+            else:
+                # тут подделать скейлы
+                self.scales_config = {}
+                print('Файл масштабов не найден')
             
             if period == 'current':
                 self.stack, self.valid_mask, self.transform, self.crs, self.profile, self.band_names, self.band_paths = \
@@ -275,37 +291,26 @@ class PythonSDM:
         # 6.1) если нужно генерировать точки псевдоотсутствия, но параметры заданы на авто
         if self.BG_PC!=100 and self.BG_DISTANCE_MIN==0:
             
-            dkingdom = ['']
-            dclass = ['']
-            
-            if 'kingdom' in self.df.columns and 'class' in self.df.columns:
-                temp_df = self.df.query("`kingdom`!='' and `class`!=''")
-                temp_df = temp_df.dropna(subset=['kingdom', 'class'])
-                dkingdom = temp_df['kingdom'].unique()
-                dclass =   temp_df['class'].unique()
-            
-            print(f"Вычислено царство {dkingdom} и класс {dclass}")
-            
             print("Нужно генерировать точки псевдоприсутствия, и параметры огибающих заданы на авто. Определяем их.")
-            if len(dkingdom)==1 and len(dclass)<=1:
+            if len(self.kingdom)==1 and len(self.dclass)<=1:
                 # значения по умолчанию
                 self.BG_DISTANCE_MIN = 10
                 self.BG_DISTANCE_MAX = 20
                 
                 # вычисляем параметры
-                if dclass==['Aves']: # Птицы
+                if self.dclass==['Aves']: # Птицы
                     self.BG_DISTANCE_MIN = 50
                     self.BG_DISTANCE_MAX = 100
                     
-                if dclass==['Mammalia']: # Млекопитающие
+                if self.dclass==['Mammalia']: # Млекопитающие
                     self.BG_DISTANCE_MIN = 20
                     self.BG_DISTANCE_MAX = 50
                     
-                if dclass==['Amphibia']: # Амфибии
+                if self.dclass==['Amphibia']: # Амфибии
                     self.BG_DISTANCE_MIN = 20
                     self.BG_DISTANCE_MAX = 50
                     
-                if dclass==['Squamata'] or dclass==['Testudines']: # Рептилии
+                if self.dclass==['Squamata'] or self.dclass==['Testudines']: # Рептилии
                     self.BG_DISTANCE_MIN = 20
                     self.BG_DISTANCE_MAX = 50
             else:
@@ -315,29 +320,32 @@ class PythonSDM:
         print(f"Вычисленные параметры точек: BG_PC={self.BG_PC},"+\
               f"BG_DISTANCE_MIN={self.BG_DISTANCE_MIN}, BG_DISTANCE_MAX={self.BG_DISTANCE_MAX}")
         
-        
-        # 6.2) Генерация фоновых точек
-        if (self.IN_MODEL=='MaxEnt'):
-            self.BG_MULT = 100
-            self.BG_ABS_PC = 0
-            self.BG_PC = 100
-        else:
-            self.BG_ABS_PC = 100 - self.BG_PC
-        
-        if month==0:
-            with open(self.TEXT_FILENAME, 'a') as f:
-                f.write(f"\n{self.BG_PC},{self.BG_ABS_PC},{self.BG_DISTANCE_MIN},{self.BG_DISTANCE_MAX},{self.BG_MULT}")
-                f.write(f"\n{self.IN_MIN_LAT},{self.IN_MIN_LON},{self.IN_MAX_LAT},{self.IN_MAX_LON},{self.IN_RESOLUTION},{self.IN_MODEL}")
-                
-        rng = np.random.default_rng(self.RANDOM_SEED)
-        n_bg = min(self.MAX_BG, self.BG_MULT * self.n_presence)
-        
-        self.rows_bg, self.cols_bg, self.rows_random, self.cols_random, self.rows_buffer, self.cols_buffer = sample_background(self.valid_mask,
-                                                       set(map(tuple, self.pres_rc)), n_bg,
-                                                       rng, self.BG_PC, self.BG_DISTANCE_MIN, self.BG_DISTANCE_MAX,
-                                                       self.TEXT_FILENAME, month)
-                
-        print(f"Сэмплировано фоновых точек: {len(self.rows_bg)}")
+        try:
+            # 6.2) Генерация фоновых точек
+            if (self.IN_MODEL=='MaxEnt'):
+                self.BG_MULT = 20
+                self.BG_ABS_PC = 0
+                self.BG_PC = 100
+            else:
+                self.BG_ABS_PC = 100 - self.BG_PC
+            
+            if month==0:
+                with open(self.TEXT_FILENAME, 'a') as f:
+                    f.write(f"\n{self.BG_PC},{self.BG_ABS_PC},{self.BG_DISTANCE_MIN},{self.BG_DISTANCE_MAX},{self.BG_MULT}")
+                    f.write(f"\n{self.IN_MIN_LAT},{self.IN_MIN_LON},{self.IN_MAX_LAT},{self.IN_MAX_LON},{self.IN_RESOLUTION},{self.IN_MODEL}")
+                    
+            rng = np.random.default_rng(self.RANDOM_SEED)
+            n_bg = min(self.MAX_BG, self.BG_MULT * self.n_presence)
+            
+            self.rows_bg, self.cols_bg, self.rows_random, self.cols_random, self.rows_buffer, self.cols_buffer = sample_background(self.valid_mask,
+                                                           set(map(tuple, self.pres_rc)), n_bg,
+                                                           rng, self.BG_PC, self.BG_DISTANCE_MIN, self.BG_DISTANCE_MAX,
+                                                           self.TEXT_FILENAME, month)
+                    
+            print(f"Сэмплировано фоновых точек: {len(self.rows_bg)}")
+        except Exception as e:
+            print('Ошибка генерации фоновых точек:')
+            print(e)
 
     
     def extract_features(self):
@@ -517,9 +525,20 @@ class PythonSDM:
             
         print('Обучение завершено')
         
+        print(f"\n-- 10А. Вычисление метрик ({self.IN_ID})")
+        
         try:
             # вычисление ROC-AUC
             y_prob = self.model.predict_proba(self.X_test)[:, 1]
+            
+            # вычисление оптимального порога threshold
+            # Пересчитываем fpr, tpr, thresholds для всех возможных пороков, чтобы найти оптимальный
+            fpr_all, tpr_all, thresholds_all = roc_curve(self.y_test, y_prob)
+        
+            # Метрика для поиска оптимального порога: максимизация sum_sens_spec
+            sum_sens_spec = tpr_all + (1 - fpr_all) # TPR = sensitivity, 1 - FPR = specificity
+            best_idx = np.argmax(sum_sens_spec)
+            self.optimal_threshold = thresholds_all[best_idx]
             
             self.auc = roc_auc_score(self.y_test, y_prob)
             print(f"ROC AUC (holdout): {self.auc:.3f}")
@@ -529,20 +548,31 @@ class PythonSDM:
             plot_roc_auc_curve(fpr, tpr, self.auc, self.OUTPUT_ROC_AUC_JPG)
             
             # вычисление других метрик
-            threshold = 0.5
-            y_pred = (y_prob >= threshold).astype(int)
+            y_pred = (y_prob >= self.optimal_threshold).astype(int)
             cm = confusion_matrix(self.y_test, y_pred)
-            TN, FP, FN, TP = cm.ravel()
+            self.TN, self.FP, self.FN, self.TP = cm.ravel()
             self.auc = roc_auc_score(self.y_test, y_prob)
             self.kappa = cohen_kappa_score(self.y_test, y_pred)
             
-            sensitivity = TP / (TP + FN) if (TP + FN) > 0 else 0
-            specificity = TN / (TN + FP) if (TN + FP) > 0 else 0
+            self.sensitivity = self.TP / (self.TP + self.FN) if (self.TP + self.FN) > 0 else 0
+            self.specificity = self.TN / (self.TN + self.FP) if (self.TN + self.FP) > 0 else 0
             
-            self.tss = sensitivity + specificity - 1
+            self.tss = self.sensitivity + self.specificity - 1
             
             print(f"TSS: {self.tss:.4f}")
             print(f"Cohen's Kappa: {self.kappa:.4f}")
+            
+            self.fdr = self.FP / (self.TP + self.FP) if (self.TP + self.FP) > 0 else 0
+            self.for_rate = self.FN / (self.TN + self.FN) if (self.TN + self.FN) > 0 else 0
+            self.ppv = self.TP / (self.TP + self.FP) if (self.TP + self.FP) > 0 else 0
+            self.npv = self.TN / (self.TN + self.FN) if (self.TN + self.FN) > 0 else 0
+            
+            self.bias_score = (self.TP + self.FP) / (self.TP + self.FN) if (self.TP + self.FN) > 0 else np.inf
+            
+            self.csi = self.TP / (self.TP + self.FN + self.FP) if (self.TP + self.FN + self.FP) > 0 else 0
+            
+            self.accuracy = accuracy_score(self.y_test, y_pred)
+            self.misclassification_rate = 1 - self.accuracy
             
             
         except Exception as e:
@@ -552,7 +582,9 @@ class PythonSDM:
         # Если это основной прогон - записываем метрики
         if month==0:
             with open(self.TEXT_FILENAME, 'a') as f:
-                f.write(f"\n{self.auc:.3f},{self.tss:.3f},{self.kappa:.3f}")
+                f.write(f"\n{self.auc:.3f},{self.tss:.3f},{self.kappa:.3f},{self.TN:.3f},{self.FP:.3f},{self.TP:.3f},{self.FN:.3f},{self.optimal_threshold:.3f},")
+                f.write(f"{self.sensitivity:.3f},{self.specificity:.3f},{self.fdr:.3f},{self.for_rate:.3f},{self.ppv:.3f},{self.npv:.3f},")
+                f.write(f"{self.bias_score:.3f},{self.csi:.3f},{self.accuracy:.3f},{self.misclassification_rate:.3f}")
                 
                 if self.species!='':
                     title = self.species
@@ -591,46 +623,52 @@ class PythonSDM:
         save_geotiff(self.OUTPUT_SUITABILITY_TIF, self.suitability, self.profile)
         print(f"Карта пригодности сохранена: {self.OUTPUT_SUITABILITY_TIF}")
         
-        mask_high_suitability05 = self.suitability > 0.05
-        hi_sui05 = np.sum(mask_high_suitability05)
-        
-        mask_high_suitability25 = self.suitability > 0.25
-        hi_sui25 = np.sum(mask_high_suitability25)
-        
-        mask_high_suitability50 = self.suitability > 0.5
-        hi_sui50 = np.sum(mask_high_suitability50)
-        
-        mask_high_suitability75 = self.suitability > 0.75
-        hi_sui75 = np.sum(mask_high_suitability75)
-        
-        mask_high_suitability95 = self.suitability > 0.95
-        hi_sui95 = np.sum(mask_high_suitability95)
+        threshold_list = [0.05, 0.25, 0.5, 0.75, 0.95, self.optimal_threshold, self.optimal_threshold/2]
+        gsq, gsc = get_geotiff_square(self.OUTPUT_SUITABILITY_TIF, threshold_list)
         
         if month==0:
             with open(self.TEXT_FILENAME, 'a') as f:
-                f.write(f"\nCHS05:{hi_sui05}")
-                f.write(f"\nCHS25:{hi_sui25}")
-                f.write(f"\nCHS50:{hi_sui50}")
-                f.write(f"\nCHS75:{hi_sui75}")
-                f.write(f"\nCHS95:{hi_sui95}")
+                f.write(f"\nSHSLOW:{gsq[6]}")
+                f.write(f"\nSHSOPT:{gsq[5]}")
+                f.write(f"\nSHS05:{gsq[0]}")
+                f.write(f"\nSHS25:{gsq[1]}")
+                f.write(f"\nSHS50:{gsq[2]}")
+                f.write(f"\nSHS75:{gsq[3]}")
+                f.write(f"\nSHS95:{gsq[4]}")
+                f.write(f"\nCHSLOW:{gsc[6]}")
+                f.write(f"\nCHSOPT:{gsc[5]}")
+                f.write(f"\nCHS05:{gsc[0]}")
+                f.write(f"\nCHS25:{gsc[1]}")
+                f.write(f"\nCHS50:{gsc[2]}")
+                f.write(f"\nCHS75:{gsc[3]}")
+                f.write(f"\nCHS95:{gsc[4]}")
         
         # Сохраним использованные точки присутствия в географических координатах:
         xs, ys = xy(self.transform, self.rows_p, self.cols_p, offset="center")
         used_occ_df = pd.DataFrame({"decimalLongitude": xs, "decimalLatitude": ys})
+        used_occ_df.loc[:, 'kingdom'] = self.kingdom[0]
+        used_occ_df.loc[:, 'class'] = self.dclass[0]
+        used_occ_df.loc[:, 'species'] = self.species
         used_occ_df.to_csv(os.path.join(os.path.dirname(self.OUTPUT_SUITABILITY_TIF),
-                                        "used_presences_"+str(self.IN_ID)+".csv"), index=False)
+                                        "used_presences_"+str(self.IN_ID)+".csv"), index=False, sep="\t")
         print("Сохранены использованные присутствия (уникальные по пикселю): used_presences_"+str(self.IN_ID)+".csv")
         
         xs, ys = xy(self.transform, self.rows_random, self.cols_random, offset="center")
         used_rand_df = pd.DataFrame({"decimalLongitude": xs, "decimalLatitude": ys})
+        #used_rand_df.loc[:, 'kingdom'] = self.kingdom[0]
+        #used_rand_df.loc[:, 'class'] = self.dclass[0]
+        #used_rand_df.loc[:, 'species'] = self.species
         used_rand_df.to_csv(os.path.join(os.path.dirname(self.OUTPUT_SUITABILITY_TIF),
-                                        "used_randoms_"+str(self.IN_ID)+".csv"), index=False)
+                                        "used_randoms_"+str(self.IN_ID)+".csv"), index=False, sep="\t")
         print("Сохранены использованные присутствия (уникальные по пикселю): used_randoms_"+str(self.IN_ID)+".csv")
         
         xs, ys = xy(self.transform, self.rows_buffer, self.cols_buffer, offset="center")
         used_buff_df = pd.DataFrame({"decimalLongitude": xs, "decimalLatitude": ys})
+        #used_buff_df.loc[:, 'kingdom'] = self.kingdom[0]
+        #used_buff_df.loc[:, 'class'] = self.dclass[0]
+        #used_buff_df.loc[:, 'species'] = self.species
         used_buff_df.to_csv(os.path.join(os.path.dirname(self.OUTPUT_SUITABILITY_TIF),
-                                        "used_buffer_"+str(self.IN_ID)+".csv"), index=False)
+                                        "used_buffer_"+str(self.IN_ID)+".csv"), index=False, sep="\t")
         print("Сохранены использованные присутствия (уникальные по пикселю): used_buffer_"+str(self.IN_ID)+".csv")
     
     
@@ -677,6 +715,8 @@ class PythonSDM:
             if self.OUTPUT_SUITABILITY_TIF_ORIG!=self.OUTPUT_SUITABILITY_TIF:
                 if os.path.exists(self.OUTPUT_SUITABILITY_TIF):
                     os.remove(self.OUTPUT_SUITABILITY_TIF)
+        
+        print(f"Карта присутствия сохранена в формате JPEG: {self.OUTPUT_SUITABILITY_JPG}")
     
     
     def predict_future(self):
@@ -705,28 +745,13 @@ class PythonSDM:
             print(f"Карта пригодности сохранена: {OUTPUT_SUITABILITY_JPG}")
             #os.remove(OUTPUT_SUITABILITY_TIF) # пока не удаляем tif для будущего
             
-            # области пригодности
-            mask_high_suitability05 = self.suitability > 0.05
-            hi_sui05 = np.sum(mask_high_suitability05)
+            threshold_list = [0.05, 0.25, 0.5, 0.75, 0.95, self.optimal_threshold, self.optimal_threshold/2]
+            gsq, gsc = get_geotiff_square(OUTPUT_SUITABILITY_TIF, threshold_list)
             
-            mask_high_suitability25 = self.suitability > 0.25
-            hi_sui25 = np.sum(mask_high_suitability25)
-            
-            mask_high_suitability50 = self.suitability > 0.5
-            hi_sui50 = np.sum(mask_high_suitability50)
-            
-            mask_high_suitability75 = self.suitability > 0.75
-            hi_sui75 = np.sum(mask_high_suitability75)
-            
-            mask_high_suitability95 = self.suitability > 0.95
-            hi_sui95 = np.sum(mask_high_suitability95)
-            try:
-                future_stats = {}
-                future_stats['1981-2010'] = []
-                future_stats['1981-2010'].append({'n05': hi_sui05, 'n50': hi_sui50, 'n95': hi_sui95, 'n25': hi_sui25, 'n75': hi_sui75})
-            except Exception as e:
-                print('Ошибка')
-                print(str(e))
+            future_stats = {}
+            future_stats['1981-2010'] = []
+            future_stats['1981-2010'].append({'n05': gsc[0], 'n50': gsc[2], 'n95': gsc[4], 'n25': gsc[1], 'n75': gsc[3], 'nopt': gsc[5], 'nlow': gsc[6],
+                                              's05': gsq[0], 's50': gsq[2], 's95': gsq[4], 's25': gsq[1], 's75': gsq[3], 'sopt': gsq[5], 'slow': gsq[6],})
             
             
             # 13.1) Прогноз для будущих периодов/сценариев
@@ -760,23 +785,10 @@ class PythonSDM:
                         save_geotiff(out_path, suitability_f, profile_fut)
                         print(f"Сохранено: {out_path}")
                         
+                        threshold_list = [0.05, 0.25, 0.5, 0.75, 0.95, self.optimal_threshold, self.optimal_threshold/2]
+                        gsq, gsc = get_geotiff_square(out_path, threshold_list)
                         
-                        mask_high_suitability05 = suitability_f > 0.05
-                        hi_sui05 = np.sum(mask_high_suitability05)
-                        
-                        mask_high_suitability25 = suitability_f > 0.25
-                        hi_sui25 = np.sum(mask_high_suitability25)
-                        
-                        mask_high_suitability50 = suitability_f > 0.5
-                        hi_sui50 = np.sum(mask_high_suitability50)
-                        
-                        mask_high_suitability75 = suitability_f > 0.75
-                        hi_sui75 = np.sum(mask_high_suitability75)
-                        
-                        mask_high_suitability95 = suitability_f > 0.95
-                        hi_sui95 = np.sum(mask_high_suitability95)
-                        
-                        out_name_img = f"{period}-{scenario}.{hi_sui05}.{hi_sui50}.{hi_sui95}.jpg"
+                        out_name_img = f"{period}-{scenario}.jpg"
                         out_path_img = os.path.join(self.OUTPUT_FUTURE_DIR, out_name_img)
                         print(f"Карта пригодности сохранена: {out_name_img}")
                         
@@ -785,10 +797,11 @@ class PythonSDM:
                             future_imgs[scenario] = []
                         
                         if scenario not in future_stats:
-                            future_stats[scenario] = []
+                            future_stats[scenario] = {}
                         
                         future_imgs[scenario].append(out_path_img)
-                        future_stats[scenario].append({'n05': hi_sui05, 'n50': hi_sui50, 'n95': hi_sui95, 'n75': hi_sui75, 'n25': hi_sui25})
+                        future_stats[scenario][period] = {'n05': gsc[0], 'n50': gsc[2], 'n95': gsc[4], 'n25': gsc[1], 'n75': gsc[3], 'nopt': gsc[5], 'nlow': gsc[6],
+                                              's05': gsq[0], 's50': gsq[2], 's95': gsq[4], 's25': gsq[1], 's75': gsq[3], 'sopt': gsq[5], 'slow': gsq[6]}
                         
                         if period=='2071-2100': # дублируем последний слайд, чтобы была пауза в анимации
                             future_imgs[scenario].append(out_path_img)

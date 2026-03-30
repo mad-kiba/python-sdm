@@ -46,11 +46,22 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
         f.write(IN_CSV)
         
     df = pd.read_csv(CSV_FILENAME, sep="\t", index_col=False, on_bad_lines='skip', low_memory=False)
+    
+    # вычисляем информацию о виде
     species = ''
     if 'species' in df.columns:
         if (len(df['species'].unique())==1):
             species = df['species'].unique()[0]
             print(f"Определён вид: {species}")
+    
+    kingdom = ['']
+    dclass = ['']
+    if 'kingdom' in df.columns and 'class' in df.columns:
+        temp_df = df.query("`kingdom`!='' and `class`!=''")
+        temp_df = temp_df.dropna(subset=['kingdom', 'class'])
+        kingdom = temp_df['kingdom'].unique()
+        dclass =   temp_df['class'].unique()
+        print(f"Вычислено царство {kingdom} и класс {dclass}")
     
     print(f"Всего загружено записей: {len(df)}")
     
@@ -88,7 +99,7 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     
     if not LAT_COL in df.columns:
         print('csv parse error')
-        raise ValueError('Ошибка обработки csv. Проверьте, что у входных данных корректный формат.')
+        raise ValueError('Ошибка обработки csv. Проверьте, что у входных данных корректный формат. Колонки с координатами должны называться lat, lon. Ячейки должны разделяться символом табуляции (при экспорте из Excel используйте формат текстовый файл с табуляцией).')
     
     # 2.1) Фильтрация мусорных данных из GBIF
     print(f"-- 2.1. Фильтрация мусорных данных из GBIF ({IN_ID})")
@@ -162,7 +173,7 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
         print('Less than 10 points')
         raise ValueError(f"Недостаточно точек. Должно быть не менее 10, сейчас: {len(occ)}.")
     
-    return {'LAT_COL': LAT_COL, 'LON_COL': LON_COL, 'df': df, 'occ': occ, 'status': 'done', 'species': species}
+    return {'LAT_COL': LAT_COL, 'LON_COL': LON_COL, 'df': df, 'occ': occ, 'status': 'done', 'species': species, 'kingdom': kingdom, 'dclass': dclass}
 
 
 def load_environmental_predictors(raster_dir, predictors = 'all', period='current', interval='', scales='', bio_info=''):

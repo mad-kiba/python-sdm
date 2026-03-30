@@ -9,6 +9,9 @@ from scipy.ndimage import distance_transform_edt
 from scipy.stats import skew, kurtosis, pearsonr, chisquare
 from scipy.spatial.distance import cosine
 import numpy as np
+import pyproj
+from shapely.geometry import shape
+from rasterio.features import shapes
 
 # Вспомогательная функция предсказания по стеку батчами
 def predict_suitability_for_stack(model, stack, valid_mask, batch_size=500_000):
@@ -276,6 +279,93 @@ def save_error(error_path, text):
         f.write(str(text))
 
 
+# считает площадь подходящих местообитаний
+def get_geotiff_square(filepath: str, threshold) -> dict:
+    with rasterio.open(filepath) as src:
+        # Получаем данные растра
+        raster_data = src.read(1)
+        geod = pyproj.Geod(ellps='WGS84')
+
+        # Получаем трансформацию растра
+        transform = src.transform
+
+        # Получаем размеры растра
+        height, width = raster_data.shape
+
+        # Словарь для хранения рассчитанных площадей пикселей по широте
+        # Ключ - широта, значение - площадь пикселя в кв.км
+        pixel_area_by_latitude = {}
+
+        # Словарь для хранения результатов
+        out_list = {t: 0.0 for t in threshold} # Инициализируем нулями
+        out_count = {t: 0.0 for t in threshold}
+
+        # Итерируемся по каждой строке (широте) растра
+        for i in range(height):
+            # Получаем широту центра пикселя в этой строке
+            # Проекция WGS84 использует координаты (долгота, широта)
+            # transform.i_to_lat(i) даст широту верхней границы пикселя,
+            # нам нужна середина для большей точности
+            center_lat = transform.f + (i + 0.5) * transform.e
+
+            # Рассчитываем площадь пикселя для данной широты, если она еще не была рассчитана
+            if center_lat not in pixel_area_by_latitude:
+                # Создаем один пиксель в этой строке для расчета площади
+                # Берем первый столбец (j=0) для примера
+                # Создаем координаты углов этого пикселя
+                try:
+                    # Получаем координаты углов пикселя (верхний левый, верхний правый, нижний правый, нижний левый)
+                    # transform.xy(i, j) возвращает (x, y) = (долгота, широта)
+                    ul_lon, ul_lat = transform * (0, i)         # Верхний левый
+                    ur_lon, ur_lat = transform * (1, i)         # Верхний правый
+                    lr_lon, lr_lat = transform * (1, i + 1)     # Нижний правый
+                    ll_lon, ll_lat = transform * (0, i + 1)     # Нижний левый
+
+                    # Создаем полигон из этих координат
+                    # Важно: pyproj.Geod ожидает список долгот и список широт
+                    pixel_polygon_coords = [(ul_lon, ul_lat), (ur_lon, ur_lat), (lr_lon, lr_lat), (ll_lon, ll_lat)]
+
+                    # Используем pyproj.Geod для расчета площади
+                    area_sq_meters, _ = geod.polygon_area_perimeter(
+                        [coord[0] for coord in pixel_polygon_coords],
+                        [coord[1] for coord in pixel_polygon_coords]
+                    )
+                    pixel_area_sq_km = abs(area_sq_meters) / 1_000_000.0
+                    pixel_area_by_latitude[center_lat] = pixel_area_sq_km
+                except Exception as e:
+                    print(f"Ошибка при расчете площади пикселя для широты {center_lat}: {e}")
+                    # В случае ошибки, можно пропустить эту строку или присвоить какое-то значение по умолчанию
+                    continue
+
+            # Если площадь для данной широты не была рассчитана (из-за ошибки), пропускаем
+            if center_lat not in pixel_area_by_latitude:
+                continue
+
+            # Получаем площадь одного пикселя для текущей широты
+            current_pixel_area = pixel_area_by_latitude[center_lat]
+
+            # Итерируемся по каждому порогу
+            for k in threshold:
+                # Создаем маску для пикселей, значение которых выше порога в текущей строке
+                mask_row = raster_data[i, :] > k
+
+                # Считаем количество пикселей в этой строке, которые выше порога
+                num_pixels_above_threshold = mask_row.sum()
+
+                # Добавляем площадь этих пикселей к общему итогу для данного порога
+                out_list[k] += num_pixels_above_threshold * current_pixel_area
+                out_count[k] += num_pixels_above_threshold
+
+    out_square = []
+    out_num = []
+    for k in threshold:
+        out_square.append(round(out_list[k]))
+        out_num.append(round(out_count[k]))
+        
+    return out_square, out_num
+    
+
+
 def save_geotiff(output_path, array2d, profile):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     prof = profile.copy()
@@ -374,8 +464,8 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
     if bg_pc == 100:
         if month == 0:
             with open(text_filename, 'a') as f:
-                f.write(f"\n{len(rows_random)}")
-        return rows_random, cols_random
+                f.write(f"\n{len(rows_random)},0")
+        return rows_random, cols_random, rows_random, cols_random, [], []
     
     # --- Часть 2: Фон в "огибающей" (буфере) ---
     # Вычисляем, сколько точек нужно для буферной части
@@ -387,16 +477,16 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
         # Если уже набрали достаточно случайных точек, возвращаем их
         if month == 0:
             with open(text_filename, 'a') as f:
-                f.write(f"\n{len(rows_random)}")
-        return rows_random, cols_random
+                f.write(f"\n{len(rows_random)},0")
+        return rows_random, cols_random, rows_random, cols_random, [], []
     
     # Если точек присутствия нет, буферная часть не может быть сгенерирована
     if not presence_rc_set:
         print("ВНИМАНИЕ: Отсутствуют точки присутствия для генерации фона в огибающей.")
         if month == 0:
             with open(text_filename, 'a') as f:
-                f.write(f"\n{len(rows_random)}")
-        return rows_random, cols_random
+                f.write(f"\n{len(rows_random)},0")
+        return rows_random, cols_random, rows_random, cols_random, [], []
     
     # 1. Создаем массив расстояний до ближайшей точки присутствия
     # Инициализируем массив бесконечностью, а точки присутствия - нулем.
