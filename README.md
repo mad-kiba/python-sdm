@@ -19,9 +19,9 @@ Species Distribution Modelling (SDM) library for Python.
 1. Скачать библиотеку и набор предикторов в отдельную папку.
 2. Установить Python:
 ```
-yum install python3 python3-pip
-или
-apt install python3 python3-pip python3-venv build-essential
+yum install python3 python3-pip # CentOS, RHEL
+# или
+apt install python3 python3-pip # Ubuntu, Debian
 ```
 3. Установить дополнительные библиотеки:
 ```
