@@ -7,6 +7,7 @@ Species Distribution Modelling (SDM) library for Python.
 Суть SDM - поиск закономерностей между местами наблюдения вида и условиями окружающей среды в этих местах.
 Примеры источников наблюдательных данных: GBIF.org, iNaturalist.org, eBird.org, wingeds.world, plantarium.su и др.
 Условия среды: WorldClim (температура, осадки), SRTM (рельеф, высоты), OSM (речные и дорожные сети) и др.
+
 Подробнее про алгоритм SDM: https://habr.com/ru/articles/983756/
 
 Для запуска SDM обычно нужно провести большую работу по сбору и подготовке этих данных.
