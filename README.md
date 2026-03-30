@@ -1,12 +1,51 @@
-# python-sdm
+# Python-SDM
 Species Distribution Modelling (SDM) library for Python.
 
 Библиотека для моделирования распространения видов (SDM) для Python.
+Доступна онлайн по адресу: https://wingeds.world/sdm
 
 Суть SDM - поиск закономерностей между местами наблюдения вида и условиями окружающей среды в этих местах.
-Примеры источников наблюдательных данных: GBIF, iNaturalist, eBird, birds.kz, wingeds.world, plantarium.su и др.
+Примеры источников наблюдательных данных: GBIF.org, iNaturalist.org, eBird.org, wingeds.world, plantarium.su и др.
 Условия среды: WorldClim (температура, осадки), SRTM (рельеф, высоты), OSM (речные и дорожные сети) и др.
 
+Подробнее про алгоритм SDM: https://habr.com/ru/articles/983756/
+
 Для запуска SDM обычно нужно провести большую работу по сбору и подготовке этих данных.
-Цель Qb.SDM - избавить вас от этой работы. Модель можно запустить здесь и сейчас.
-Птицы, млекопитающие, рептилии, насекомые, растения - пробуйте всё.
+Библиотека Python-SDM развёрнута онлайн вместе с большим набором предикторов, приведённых к одному пространственному разрешению. 
+Модель можно запустить здесь и сейчас: птицы, млекопитающие, рептилии, насекомые, растения - пробуйте всё. Адрес: https://wingeds.world/sdm
+
+# Установка и запуск локальной версии
+**Для запуска Python-SDM локально нужно:**
+1. Скачать библиотеку в отдельную папку, например, `python_sdm`.
+   
+2. Установить Python:
+```
+yum install python3 python3-pip libxcb mesa-libGL # CentOS, RHEL
+# или
+apt install python3 python3-pip libxcb1 libgl1 # Ubuntu, Debian
+```
+3. Установить дополнительные библиотеки:
+```
+pip install pandas geopandas matplotlib scikit-learn xgboost opencv-python rasterio contextily pyproj shapely osmnx
+```
+
+**Технически библиотека готова к запуску. 
+Дальше собираем исходные данные: слои-предикторы и наблюдательные данные:**
+
+4. Создать папку `python_sdm\input_predictors` для предикторов. В ней может быть до четырёх подпапок:
+- `python_sdm\input_predictors\static` - предикторы в этой папке считаются статическими, неизменными по времени. Соответственно, модель может их использовать и для текущего времени, и для будущего (например, высота над уровнем моря - WorldClim height);
+- `python_sdm\input_predictors\dynamic_current` - предикторы в этой папке считаются динамическими (например, WorldClim BIOxx). Если вы моделируете будущее, файлы с аналогичным названием должны лежать в следующей папке:
+- `python_sdm\input_predictors\dynamic_predictable` - в этой папке лежат предикторы будущего (например, WorldClim BIOxx SSP370), каждый сценарий будущего должен лежать в отдельной подпапке, внутри которой свои подпапки на периоды;
+- `python_sdm\input_predictors\dynamic_past` - в этой папке лежат предикторы прошлого (например, CHELSA TraCE21k), каждый сценарий прошлого должен лежать в отдельной подпапка, внутри которой свои подпапки на периоды.
+Предикторы должны быть в формате GeoTIFF. Если в GeoTIFF несколько слоёв, используется только первый из них.
+Для минимального запуска можно скачать `WorldClim elevation` (https://www.worldclim.org/data/worldclim21.html - масштаб `30 seconds`) и распаковать в папку `python_sdm\input_predictors\static`, а `Bioclimatic variables` скачать и распаковать в папку `python_sdm\input_predictors\dynamic_current`
+
+5. Скопировать содержание папки `python_sdm\examples` (папку `data` и файл `example_minimal_py`) в корень текущей папки `python_sdm` (там же, где лежат папки `sdm и input_predictors`).
+
+6. В этой папке выполнить команду:
+```
+python example_minimal_py
+```
+В результате будет запущена SDM для сапсана на территории Алтая. 
+
+7. В папку `python_sdm\data` можно загрузить наблюдательные данные по любому интересующему виду. Наблюдательные данные можно взять на GBIF.org. Несколько минимальных примеров уже лежит в папке `examples\data`
