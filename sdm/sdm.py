@@ -198,9 +198,10 @@ class PythonSDM:
             
             try:
                 basepath = 'output_predictors/'
-                with zipfile.ZipFile(self.PREDICTORS_JPEGS+"/"+str(self.IN_ID)+".zip", "w", compression=zipfile.ZIP_DEFLATED) as z:
-                    for p in map(Path, self.band_paths):
-                        z.write(p, arcname=p.relative_to(basepath))  # все файлы в корне архива
+                # больше не упаковываем предикторы в отдельные архивы, сохраняем напрямую
+                #with zipfile.ZipFile(self.PREDICTORS_JPEGS+"/"+str(self.IN_ID)+".zip", "w", compression=zipfile.ZIP_DEFLATED) as z:
+                #    for p in map(Path, self.band_paths):
+                #        z.write(p, arcname=p.relative_to(basepath))  # все файлы в корне архива
             except Exception as e:
                 print(e)
             print("Проекции предикторов сохранены в архив")
@@ -342,7 +343,7 @@ class PythonSDM:
                                                            rng, self.BG_PC, self.BG_DISTANCE_MIN, self.BG_DISTANCE_MAX,
                                                            self.TEXT_FILENAME, month)
                     
-            print(f"Сэмплировано фоновых точек: {len(self.rows_bg)}")
+            print(f"Сэмплировано фоновых точек + точек псевдоотсутствия: {len(self.rows_bg)}")
         except Exception as e:
             print('Ошибка генерации фоновых точек:')
             print(e)
@@ -643,33 +644,34 @@ class PythonSDM:
                 f.write(f"\nCHS75:{gsc[3]}")
                 f.write(f"\nCHS95:{gsc[4]}")
         
-        # Сохраним использованные точки присутствия в географических координатах:
-        xs, ys = xy(self.transform, self.rows_p, self.cols_p, offset="center")
-        used_occ_df = pd.DataFrame({"decimalLongitude": xs, "decimalLatitude": ys})
-        used_occ_df.loc[:, 'kingdom'] = self.kingdom[0]
-        used_occ_df.loc[:, 'class'] = self.dclass[0]
-        used_occ_df.loc[:, 'species'] = self.species
-        used_occ_df.to_csv(os.path.join(os.path.dirname(self.OUTPUT_SUITABILITY_TIF),
-                                        "used_presences_"+str(self.IN_ID)+".csv"), index=False, sep="\t")
-        print("Сохранены использованные присутствия (уникальные по пикселю): used_presences_"+str(self.IN_ID)+".csv")
-        
-        xs, ys = xy(self.transform, self.rows_random, self.cols_random, offset="center")
-        used_rand_df = pd.DataFrame({"decimalLongitude": xs, "decimalLatitude": ys})
-        #used_rand_df.loc[:, 'kingdom'] = self.kingdom[0]
-        #used_rand_df.loc[:, 'class'] = self.dclass[0]
-        #used_rand_df.loc[:, 'species'] = self.species
-        used_rand_df.to_csv(os.path.join(os.path.dirname(self.OUTPUT_SUITABILITY_TIF),
-                                        "used_randoms_"+str(self.IN_ID)+".csv"), index=False, sep="\t")
-        print("Сохранены использованные присутствия (уникальные по пикселю): used_randoms_"+str(self.IN_ID)+".csv")
-        
-        xs, ys = xy(self.transform, self.rows_buffer, self.cols_buffer, offset="center")
-        used_buff_df = pd.DataFrame({"decimalLongitude": xs, "decimalLatitude": ys})
-        #used_buff_df.loc[:, 'kingdom'] = self.kingdom[0]
-        #used_buff_df.loc[:, 'class'] = self.dclass[0]
-        #used_buff_df.loc[:, 'species'] = self.species
-        used_buff_df.to_csv(os.path.join(os.path.dirname(self.OUTPUT_SUITABILITY_TIF),
-                                        "used_buffer_"+str(self.IN_ID)+".csv"), index=False, sep="\t")
-        print("Сохранены использованные присутствия (уникальные по пикселю): used_buffer_"+str(self.IN_ID)+".csv")
+        if month==0:
+            # Сохраним использованные точки присутствия в географических координатах:
+            xs, ys = xy(self.transform, self.rows_p, self.cols_p, offset="center")
+            used_occ_df = pd.DataFrame({"decimalLongitude": xs, "decimalLatitude": ys})
+            used_occ_df.loc[:, 'kingdom'] = self.kingdom[0]
+            used_occ_df.loc[:, 'class'] = self.dclass[0]
+            used_occ_df.loc[:, 'species'] = self.species
+            used_occ_df.to_csv(os.path.join(os.path.dirname(self.OUTPUT_SUITABILITY_TIF),
+                                            "used_presences_"+str(self.IN_ID)+".csv"), index=False, sep="\t")
+            print("Сохранены использованные присутствия (уникальные по пикселю): used_presences_"+str(self.IN_ID)+".csv")
+            
+            xs, ys = xy(self.transform, self.rows_random, self.cols_random, offset="center")
+            used_rand_df = pd.DataFrame({"decimalLongitude": xs, "decimalLatitude": ys})
+            #used_rand_df.loc[:, 'kingdom'] = self.kingdom[0]
+            #used_rand_df.loc[:, 'class'] = self.dclass[0]
+            #used_rand_df.loc[:, 'species'] = self.species
+            used_rand_df.to_csv(os.path.join(os.path.dirname(self.OUTPUT_SUITABILITY_TIF),
+                                            "used_randoms_"+str(self.IN_ID)+".csv"), index=False, sep="\t")
+            print("Сохранены использованные присутствия (уникальные по пикселю): used_randoms_"+str(self.IN_ID)+".csv")
+            
+            xs, ys = xy(self.transform, self.rows_buffer, self.cols_buffer, offset="center")
+            used_buff_df = pd.DataFrame({"decimalLongitude": xs, "decimalLatitude": ys})
+            #used_buff_df.loc[:, 'kingdom'] = self.kingdom[0]
+            #used_buff_df.loc[:, 'class'] = self.dclass[0]
+            #used_buff_df.loc[:, 'species'] = self.species
+            used_buff_df.to_csv(os.path.join(os.path.dirname(self.OUTPUT_SUITABILITY_TIF),
+                                            "used_buffer_"+str(self.IN_ID)+".csv"), index=False, sep="\t")
+            print("Сохранены использованные присутствия (уникальные по пикселю): used_buffer_"+str(self.IN_ID)+".csv")
     
     
     def calculate_moransi(self):
@@ -838,24 +840,24 @@ class PythonSDM:
             
             print(f"\nВсе прогнозы сохранены в папку: '{self.OUTPUT_FUTURE_DIR}'")
     
-            archive_name = "futures.zip"
-            archive_path = os.path.join(self.OUTPUT_FUTURE_DIR, archive_name)
+            # Больше не упаковываем файлы в архив, передаём как есть
+            #archive_name = "futures.zip"
+            #archive_path = os.path.join(self.OUTPUT_FUTURE_DIR, archive_name)
             
             # 13.4) Получаем список всех файлов в папке для упаковки в архив
-            files_to_zip = glob.glob(os.path.join(self.OUTPUT_FUTURE_DIR, "*"))
+            #files_to_zip = glob.glob(os.path.join(self.OUTPUT_FUTURE_DIR, "*"))
             
             # 13.5) Проверяем, есть ли вообще файлы для упаковки, пакуем
-            if not files_to_zip:
-                print(f"В папке {self.OUTPUT_FUTURE_DIR} нет файлов для упаковки.")
-            else:
-                # 3. Создаем ZIP-архив
-                with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                    for file_path in files_to_zip:
-                        # Добавляем файл в архив. os.path.basename гарантирует,
-                        # что в архиве будут только имена файлов, а не полные пути.
-                        zipf.write(file_path, os.path.basename(file_path))
-            
-            print(f"Все файлы из '{self.OUTPUT_FUTURE_DIR}' успешно упакованы в '{archive_path}'.")
+            #if not files_to_zip:
+            #    print(f"В папке {self.OUTPUT_FUTURE_DIR} нет файлов для упаковки.")
+            #else:
+            #    # 3. Создаем ZIP-архив
+            #    with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            #        for file_path in files_to_zip:
+            #            # Добавляем файл в архив. os.path.basename гарантирует,
+            #            # что в архиве будут только имена файлов, а не полные пути.
+            #            zipf.write(file_path, os.path.basename(file_path))
+            #print(f"Все файлы из '{self.OUTPUT_FUTURE_DIR}' успешно упакованы в '{archive_path}'.")
             
     
     def predict_past(self):

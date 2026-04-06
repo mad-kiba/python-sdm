@@ -1,9 +1,9 @@
 def get_predictors_info():
     bio_info = {
-        'roughness_std3x3':                 {'title': "Пересечённость рельефа (стандартное отклонение на сетке 3х3 км)", 'unit': 'м', 'scale': 1, 'diff': 0, 'min_val': 0},
+        'roughness_std3x3':                 {'title': "Пересечённость рельефа (стандартное отклонение на сетке 3х3 км)", 'unit': 'м/м', 'scale': 1, 'diff': 0, 'min_val': 0},
         'slope_deg':                        {'title': "Уклон рельефа на заданном шаге модели", 'unit': '', 'scale': 1, 'diff': 0, 'min_val': 0},
-        'distance_to_cities':               {'title': "Расстояние до городской застройки", 'unit': '', 'scale': 1, 'diff': 0, 'step': 1, 'min_val': 0, 'min_val': 0},
-        'distance_to_water':                {'title': "Расстояние до водоёмов", 'unit': '', 'scale': 1, 'diff': 0, 'min_val': 0, 'step': 1},
+        'distance_to_cities':               {'title': "Расстояние до городской застройки", 'unit': 'км', 'scale': 1, 'diff': 0, 'step': 1, 'min_val': 0, 'min_val': 0},
+        'distance_to_water':                {'title': "Расстояние до водоёмов", 'unit': 'км', 'scale': 1, 'diff': 0, 'min_val': 0, 'step': 1},
         'wc2.1_30s_elev':                   {'title': "WC ELEV: Высота над уровнем моря", 'unit': 'м', 'scale': 1, 'diff': 0, 'step': 1, 'min_val': -200},
         
         'wc2.1_30s_bio_1':                  {'title': "WC BIO1: Среднегодовая температура (Mean annual temperature)", 'unit': '°C', 'scale': 1, 'diff': 0, 'min_val': -100},
