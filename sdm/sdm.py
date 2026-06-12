@@ -1,4 +1,5 @@
 # sdm/sdm.py
+# Библиотека PythonSDM для моделирования распространения видов
 
 import os
 import traceback
@@ -22,7 +23,7 @@ from sklearn.calibration import CalibratedClassifierCV
 # Импорт функций из utils
 from .utils.preprocessing import clip_rasters, points_to_pixel_indices, pixel_indices_to_points
 from .utils.data_loader import load_species_occurrence_data, load_environmental_predictors
-from .utils.utils import sample_background, extract_features_from_stack, inverse_scale
+from .utils.utils import sample_background, extract_features_from_stack, inverse_scale, apply_decay_to_points, continuous_boyce_index
 from .utils.utils import save_geotiff, predict_suitability_for_stack, save_error, get_geotiff_square
 from .utils.plots import create_beautiful_histogram, draw_map, create_animated_gif, create_avi_from_images, plot_roc_auc_curve
 from .utils.models import MaxEnt
@@ -287,11 +288,17 @@ class PythonSDM:
 
 
     def generate_bg_pa(self, month = 0):
-        # 6) Генерация фоновых точек и точек псевдоотсутствия
+        # 6) Генерация фоновых точек и точек псевдоотсутствия, а также фактора мобильности
         print(f"\n-- 6. Генерация фоновых точек и точек псевдоотсутствия ({self.IN_ID})")
+        
+        # границы распространения вида, фактор мобильности по умолчанию
+        rec_mf_cur = 100
+        rec_mf_2040 = 200
+        rec_mf_2070 = 300
+        rec_mf_2100 = 400
+        
         # 6.1) если нужно генерировать точки псевдоотсутствия, но параметры заданы на авто
         if self.BG_PC!=100 and self.BG_DISTANCE_MIN==0:
-            
             print("Нужно генерировать точки псевдоприсутствия, и параметры огибающих заданы на авто. Определяем их.")
             if len(self.kingdom)==1 and len(self.dclass)<=1:
                 # значения по умолчанию
@@ -303,19 +310,51 @@ class PythonSDM:
                     self.BG_DISTANCE_MIN = 50
                     self.BG_DISTANCE_MAX = 100
                     
+                    rec_mf_cur = 1000
+                    rec_mf_2040 = 2000
+                    rec_mf_2070 = 3000
+                    rec_mf_2100 = 4000
+                    
                 if self.dclass==['Mammalia']: # Млекопитающие
                     self.BG_DISTANCE_MIN = 20
                     self.BG_DISTANCE_MAX = 50
+                    
+                    rec_mf_cur = 400
+                    rec_mf_2040 = 800
+                    rec_mf_2070 = 1200
+                    rec_mf_2100 = 1600
                     
                 if self.dclass==['Amphibia']: # Амфибии
                     self.BG_DISTANCE_MIN = 20
                     self.BG_DISTANCE_MAX = 50
                     
+                    rec_mf_cur = 200
+                    rec_mf_2040 = 400
+                    rec_mf_2070 = 600
+                    rec_mf_2100 = 800
+                    
                 if self.dclass==['Squamata'] or self.dclass==['Testudines']: # Рептилии
                     self.BG_DISTANCE_MIN = 20
                     self.BG_DISTANCE_MAX = 50
+                    
+                    rec_mf_cur = 200
+                    rec_mf_2040 = 400
+                    rec_mf_2070 = 600
+                    rec_mf_2100 = 800
             else:
                 self.BG_PC = 100
+        
+        # если фактор мобильности задан на авто
+        if self.M_FACTOR_CUR == 0:
+            self.M_FACTOR_CUR = rec_mf_cur
+        if self.M_FACTOR_2040 == 0:
+            self.M_FACTOR_2040 = rec_mf_2040
+        if self.M_FACTOR_2070 == 0:
+            self.M_FACTOR_2070 = rec_mf_2070
+        if self.M_FACTOR_2100 == 0:
+            self.M_FACTOR_2100 = rec_mf_2100
+        
+        print(f"Текущие факторы мобильности: {self.M_FACTOR_CUR}, {self.M_FACTOR_2040}, {self.M_FACTOR_2070}, {self.M_FACTOR_2100}")
         
         print(f"\n-- Генерация фоновых точек и точек псевдоотсутствия ({self.IN_ID})")
         print(f"Вычисленные параметры точек: BG_PC={self.BG_PC},"+\
@@ -531,6 +570,11 @@ class PythonSDM:
         try:
             # вычисление ROC-AUC
             y_prob = self.model.predict_proba(self.X_test)[:, 1]
+
+            # вычисление Continuous Boyce Index (CBI)
+            obs_prob = y_prob[self.y_test == 1]
+            self.boyce_index = continuous_boyce_index(obs_prob, y_prob)
+            print(f"Continuous Boyce Index (CBI): {self.boyce_index:.3f}")
             
             # вычисление оптимального порога threshold
             # Пересчитываем fpr, tpr, thresholds для всех возможных пороков, чтобы найти оптимальный
@@ -546,7 +590,7 @@ class PythonSDM:
             
             # строим график ROC-AUC
             fpr, tpr, thresholds = roc_curve(self.y_test, y_prob)
-            plot_roc_auc_curve(fpr, tpr, self.auc, self.OUTPUT_ROC_AUC_JPG)
+            plot_roc_auc_curve(fpr, tpr, self.auc, self.OUTPUT_ROC_AUC_JPG, self.IN_ID)
             
             # вычисление других метрик
             y_pred = (y_prob >= self.optimal_threshold).astype(int)
@@ -585,7 +629,8 @@ class PythonSDM:
             with open(self.TEXT_FILENAME, 'a') as f:
                 f.write(f"\n{self.auc:.3f},{self.tss:.3f},{self.kappa:.3f},{self.TN:.3f},{self.FP:.3f},{self.TP:.3f},{self.FN:.3f},{self.optimal_threshold:.3f},")
                 f.write(f"{self.sensitivity:.3f},{self.specificity:.3f},{self.fdr:.3f},{self.for_rate:.3f},{self.ppv:.3f},{self.npv:.3f},")
-                f.write(f"{self.bias_score:.3f},{self.csi:.3f},{self.accuracy:.3f},{self.misclassification_rate:.3f}")
+                f.write(f"{self.bias_score:.3f},{self.csi:.3f},{self.accuracy:.3f},{self.misclassification_rate:.3f},{self.boyce_index:.3f}")
+
                 
                 if self.species!='':
                     title = self.species
@@ -624,25 +669,40 @@ class PythonSDM:
         save_geotiff(self.OUTPUT_SUITABILITY_TIF, self.suitability, self.profile)
         print(f"Карта пригодности сохранена: {self.OUTPUT_SUITABILITY_TIF}")
         
+        #try:
+        #    apply_decay_to_points(
+        #        input_tiff_path=self.OUTPUT_SUITABILITY_TIF,
+        #        observation_rows=self.rows_coord,
+        #        observation_cols=self.cols_coord,
+        #        buffer_km=self.M_FACTOR_CUR,
+        #        decay_type='buffer',
+        #        decay_rate=0.1 # Используем decay_rate как sigma
+        #    )
+        #except Exception as e:
+        #    print('Ошибка применения фактора мобильности')
+        #    print(str(e))
+        #    full_error_string = traceback.format_exc()
+        #    print(full_error_string)
+        
         threshold_list = [0.05, 0.25, 0.5, 0.75, 0.95, self.optimal_threshold, self.optimal_threshold/2]
-        gsq, gsc = get_geotiff_square(self.OUTPUT_SUITABILITY_TIF, threshold_list)
+        self.gsq, self.gsc = get_geotiff_square(self.OUTPUT_SUITABILITY_TIF, threshold_list)
         
         if month==0:
             with open(self.TEXT_FILENAME, 'a') as f:
-                f.write(f"\nSHSLOW:{gsq[6]}")
-                f.write(f"\nSHSOPT:{gsq[5]}")
-                f.write(f"\nSHS05:{gsq[0]}")
-                f.write(f"\nSHS25:{gsq[1]}")
-                f.write(f"\nSHS50:{gsq[2]}")
-                f.write(f"\nSHS75:{gsq[3]}")
-                f.write(f"\nSHS95:{gsq[4]}")
-                f.write(f"\nCHSLOW:{gsc[6]}")
-                f.write(f"\nCHSOPT:{gsc[5]}")
-                f.write(f"\nCHS05:{gsc[0]}")
-                f.write(f"\nCHS25:{gsc[1]}")
-                f.write(f"\nCHS50:{gsc[2]}")
-                f.write(f"\nCHS75:{gsc[3]}")
-                f.write(f"\nCHS95:{gsc[4]}")
+                f.write(f"\nSHSLOW:{self.gsq[6]}")
+                f.write(f"\nSHSOPT:{self.gsq[5]}")
+                f.write(f"\nSHS05:{self.gsq[0]}")
+                f.write(f"\nSHS25:{self.gsq[1]}")
+                f.write(f"\nSHS50:{self.gsq[2]}")
+                f.write(f"\nSHS75:{self.gsq[3]}")
+                f.write(f"\nSHS95:{self.gsq[4]}")
+                f.write(f"\nCHSLOW:{self.gsc[6]}")
+                f.write(f"\nCHSOPT:{self.gsc[5]}")
+                f.write(f"\nCHS05:{self.gsc[0]}")
+                f.write(f"\nCHS25:{self.gsc[1]}")
+                f.write(f"\nCHS50:{self.gsc[2]}")
+                f.write(f"\nCHS75:{self.gsc[3]}")
+                f.write(f"\nCHS95:{self.gsc[4]}")
         
         if month==0:
             # Сохраним использованные точки присутствия в географических координатах:
@@ -705,12 +765,21 @@ class PythonSDM:
         if month!=0:
             title = title + ", месяц: "+str(month)
         
-        if self.n_presence>5:
-            #print('---Tif:'+self.OUTPUT_SUITABILITY_TIF)
-            draw_map(self.OUTPUT_SUITABILITY_TIF, self.OUTPUT_SUITABILITY_JPG, title, self.rows_coord, self.cols_coord)
-        else:
-            #print('---Tif:'+self.OUTPUT_SUITABILITY_TIF_ORIG)
-            draw_map(self.OUTPUT_SUITABILITY_TIF_ORIG, self.OUTPUT_SUITABILITY_JPG, title, self.rows_coord, self.cols_coord, 1)
+        subopt = self.optimal_threshold/2
+        adt1 = f"\nSопт = "+str(self.gsq[5])+f" кв.км (p>{self.optimal_threshold:.3f}), "
+        adt2 = f"Sсубопт = "+str(self.gsq[6])+f" кв.км (p>{subopt:.3f})"
+        title = title + adt1 + adt2
+        
+        try:
+            if self.n_presence>5:
+                #print('---Tif:'+self.OUTPUT_SUITABILITY_TIF)
+                draw_map(self.OUTPUT_SUITABILITY_TIF, self.OUTPUT_SUITABILITY_JPG, title, self.rows_coord, self.cols_coord, id=self.IN_ID)
+            else:
+                #print('---Tif:'+self.OUTPUT_SUITABILITY_TIF_ORIG)
+                draw_map(self.OUTPUT_SUITABILITY_TIF_ORIG, self.OUTPUT_SUITABILITY_JPG, title, self.rows_coord, self.cols_coord, 1, id=self.IN_ID)
+        except Exception as e:
+            print('Ошибка рисования карты')
+            print(str(e))
         
         if month!=0:
             self.monthly_imgs.append(self.OUTPUT_SUITABILITY_JPG)
@@ -738,17 +807,24 @@ class PythonSDM:
             save_geotiff(OUTPUT_SUITABILITY_TIF, self.suitability, self.profile)
             print(f"Карта пригодности сохранена: {OUTPUT_SUITABILITY_TIF}")
             
+            threshold_list = [0.05, 0.25, 0.5, 0.75, 0.95, self.optimal_threshold, self.optimal_threshold/2]
+            gsq, gsc = get_geotiff_square(OUTPUT_SUITABILITY_TIF, threshold_list)
+            
             title = ''
             if self.species!='':
                 title = 'Карта вероятности присутствия вида '+self.species+\
                         f" ({self.IN_ID})\nТекущий период (базовые климатические переменные)"
+            
+            subopt = self.optimal_threshold/2
+            adt1 = f"\nSопт = "+str(gsq[5])+f" кв.км (p>{self.optimal_threshold:.3f}), "
+            adt2 = f"Sсубопт = "+str(gsq[6])+f" кв.км (p>{subopt:.3f})"
+            title = title + adt1 + adt2
+                
             OUTPUT_SUITABILITY_JPG = self.OUTPUT_FUTURE_DIR + "/1981-2010.jpg"
-            draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title, self.rows_coord, self.cols_coord)
+            draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title, self.rows_coord, self.cols_coord, id=self.IN_ID)
             print(f"Карта пригодности сохранена: {OUTPUT_SUITABILITY_JPG}")
             #os.remove(OUTPUT_SUITABILITY_TIF) # пока не удаляем tif для будущего
             
-            threshold_list = [0.05, 0.25, 0.5, 0.75, 0.95, self.optimal_threshold, self.optimal_threshold/2]
-            gsq, gsc = get_geotiff_square(OUTPUT_SUITABILITY_TIF, threshold_list)
             
             future_stats = {}
             future_stats['1981-2010'] = []
@@ -815,8 +891,12 @@ class PythonSDM:
                         if self.species!='':
                             title = 'Карта вероятности присутствия вида '+self.species+\
                                     f" ({self.IN_ID})\nПериод: "+period+" (сценарий "+scenario+")"
+                            
+                        adt1 = f"\nSопт = "+str(gsq[5])+f" кв.км, "
+                        adt2 = f"Sсубопт = "+str(gsq[6])+f" кв.км"
+                        title = title + adt1 + adt2
                         
-                        draw_map(out_path, out_path_img, title, self.rows_coord, self.cols_coord)
+                        draw_map(out_path, out_path_img, title, self.rows_coord, self.cols_coord, id=self.IN_ID)
                         if scenario!='SSP370_EC-Earth3-Veg' and scenario!='ssp370':
                             os.remove(out_path) # пока не удаляем tif для будущего
             
@@ -859,6 +939,8 @@ class PythonSDM:
             #            zipf.write(file_path, os.path.basename(file_path))
             #print(f"Все файлы из '{self.OUTPUT_FUTURE_DIR}' успешно упакованы в '{archive_path}'.")
             
+            print()
+    
     
     def predict_past(self):
         # 14) если это стандартный регион - делаем с нашей моделью прогноз прошлого

@@ -15,11 +15,11 @@ from shapely.geometry import Polygon
 import warnings
 import osmnx as ox
 
-from .utils import get_predictor_stats, format_float, calculate_histogram_similarity
+from .utils import get_predictor_stats, format_float, calculate_histogram_similarity, get_geotiff_square
 from .utils import read_and_to_3857, round_to_significant_figures, wrap_long_lines
 
 
-def plot_roc_auc_curve(fpr, tpr, auc, auc_path): # постройка кривой ROC-AUC
+def plot_roc_auc_curve(fpr, tpr, auc, auc_path, id): # постройка кривой ROC-AUC
     plt.figure(figsize=(8, 6))
     plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (AUC = {auc:.3f})')
     plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', label='Случайное угадывание') # Случайное угадывание
@@ -27,7 +27,7 @@ def plot_roc_auc_curve(fpr, tpr, auc, auc_path): # постройка криво
     plt.ylim([0.0, 1.05])
     plt.xlabel('Ложные позитивные')
     plt.ylabel('Истинные позитивные')
-    plt.title('ROC-кривая')
+    plt.title('ROC-кривая (id='+str(id)+')')
     plt.legend(loc="lower right")
     plt.grid(True)
     #plt.show()
@@ -338,7 +338,7 @@ def plot_geotiff_with_osm(geotiff_path: str, output_path: str, mean: float, scal
         print(f"График успешно сохранен в {output_path}")
 
 
-def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title = '', rows=[], cols=[], map_only=0):
+def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title = '', rows=[], cols=[], map_only=0, id=0):
     data, transform, width, height = read_and_to_3857(OUTPUT_SUITABILITY_TIF)
     
     # если наблюдений меньше пяти и моделирования не было, рисуем только точки
@@ -471,7 +471,28 @@ def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title = '', rows=[]
     else:
         ax.set_title(title, pad=8, fontsize=title_fs)
     
+    
     plt.tight_layout()
+    
+    text2 = "https://wingeds.world/sdm/"+str(id)+" - модель распространения вида (SDM)"
+    text1 = "https://wingeds.world/biodiv - карта биоразнообразия Центральной Азии"
+    font_size_text = 6 # Размер шрифта для дополнительного текста
+    vertical_offset = 0.03 # Начальный отступ от нижнего края графика (можно будет подстроить)
+    
+    renderer = fig.canvas.get_renderer()
+    bbox_axes = ax.get_tightbbox(renderer)
+    bottom_margin = 0.15
+    fig.subplots_adjust(bottom=0.18)
+    fig_height_inches = fig.get_size_inches()[1]
+    text_height_estimate = (font_size_text / 72.0) * 1.5 # Примерная высота двух строк + межстрочный интервал в дюймах
+    text_y_offset_relative = text_height_estimate / fig_height_inches
+    
+    fig.text(0.5, bottom_margin - text_y_offset_relative, text1,
+             ha='center', va='bottom', fontsize=font_size_text, wrap=True)
+    # Нижняя строка:
+    fig.text(0.5, bottom_margin - text_y_offset_relative * 2, text2,
+             ha='center', va='bottom', fontsize=font_size_text, wrap=True)
+    
     # print('Сохранение карты: '+OUTPUT_SUITABILITY_JPG)
     # Сохранение с высоким разрешением (длина ≥ 2000 px)
     plt.savefig(

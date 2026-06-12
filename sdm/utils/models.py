@@ -3,17 +3,20 @@ from scipy.optimize import minimize
 
 class MaxEnt:
     """
-    Минимальная реализация модели максимальной энтропии (MaxEnt)
-    для моделирования ареала вида.
+    Реализация модели максимальной энтропии (MaxEnt), максимально приближенная
+    к классическому алгоритму (генерация сложных признаков, L2-регуляризация
+    и калибровка логистического выхода).
 
     Args:
         X_pres (np.ndarray): Массив предикторов в точках присутствия.
                              Форма: (n_pres, n_features).
         X_bg (np.ndarray): Массив предикторов в фоновых точках.
                            Форма: (n_bg, n_features).
-                           Ожидается, что n_bg >> n_pres.
+        add_quadratic (bool): Включает генерацию квадратичных фичей (x^2).
+        add_product (bool): Включает попарные произведения фичей (x_i * x_j).
+        reg_lambda (float): Коэффициент L2-регуляризации для предотвращения переобучения.
     """
-    def __init__(self, X_pres, X_bg):
+    def __init__(self, X_pres, X_bg, add_quadratic=True, add_product=False, reg_lambda=0.01):
         self.X_pres = np.asarray(X_pres)
         self.X_bg = np.asarray(X_bg)
 
@@ -27,173 +30,162 @@ class MaxEnt:
 
         self.n_pres = self.X_pres.shape[0]
         self.n_bg = self.X_bg.shape[0]
-        self.n_features = self.X_pres.shape[1]
+        self.n_features_orig = self.X_pres.shape[1]
+        
+        self.add_quadratic = add_quadratic
+        self.add_product = add_product
+        self.reg_lambda = reg_lambda
 
-        # Создаем объединенный набор данных для обучения
-        # y=1 для точек присутствия, y=0 для фоновых точек
         self.X_train = np.vstack((self.X_pres, self.X_bg))
         self.y_train = np.array([1] * self.n_pres + [0] * self.n_bg)
+        self.n_samples = self.X_train.shape[0]
 
-        # Веса признаков (инициализируем нулями)
-        self.weights = np.zeros(self.n_features)
-
-        # Важность признаков (будет заполнена после обучения)
+        self.weights = None
         self._feature_importances_ = None
+        self.log_Z_ = 0.0
+        self.entropy_ = 0.0
+        self.feature_mapping = []
+
+    def _expand_features(self, X):
+        """Генерация сложных фичей (линейные, квадратичные, произведения)."""
+        features = [X]
+        if self.add_quadratic:
+            features.append(X ** 2)
+            
+        if self.add_product:
+            prods = []
+            for i in range(self.n_features_orig):
+                for j in range(i + 1, self.n_features_orig):
+                    prods.append(X[:, i] * X[:, j])
+            if prods:
+                features.append(np.column_stack(prods))
+                
+        return np.hstack(features)
+
+    def _get_feature_mapping(self):
+        """Связывает индексы расширенных фичей с оригинальными для оценки важности."""
+        mapping = []
+        # Linear
+        for i in range(self.n_features_orig):
+            mapping.append([i])
+        # Quadratic
+        if self.add_quadratic:
+            for i in range(self.n_features_orig):
+                mapping.append([i])
+        # Product
+        if self.add_product:
+            for i in range(self.n_features_orig):
+                for j in range(i + 1, self.n_features_orig):
+                    mapping.append([i, j])
+        return mapping
 
     def _sigmoid(self, z, max_val=700):
-        """
-        Численно стабильная сигмоида с дополнительной защитой от переполнения.
-        max_val: Значение, до которого ограничиваются аргументы exp, чтобы избежать переполнения.
-                 Значение 700 является близким к пределу для float64.
-        """
-        # Обрабатываем z >= 0: вычисляем 1 / (1 + exp(-z))
-        # Здесь проблема может быть, если z очень большое ОТРИЦАТЕЛЬНОЕ,
-        # тогда -z будет очень большим ПОЛОЖИТЕЛЬНЫМ, и exp(-z) переполнится.
-        # Но мы в ветке z >= 0, значит z не может быть отрицательным.
-        # Однако, если z очень большое ПОЛОЖИТЕЛЬНОЕ, то -z будет очень большим ОТРИЦАТЕЛЬНЫМ,
-        # и exp(-z) будет стремиться к 0. Это безопасно.
-
-        # Обрабатываем z < 0: вычисляем exp(z) / (exp(z) + 1)
-        # Здесь проблема может быть, если z очень большое ОТРИЦАТЕЛЬНОЕ,
-        # тогда exp(z) будет стремиться к 0. Это безопасно.
-        # Если z очень большое ПОЛОЖИТЕЛЬНОЕ (что невозможно в этой ветке),
-        # тогда exp(z) может переполниться.
-
-        # Похоже, проблема в том, что z может быть очень большим отрицательным числом,
-        # и тогда -z становится очень большим положительным числом.
-        # Это вызывает overflow в np.exp(-z) в первой ветке.
-
-        # Давайте добавим клипинг к аргументам exp.
-        # Ограничиваем значение -z, чтобы exp(-z) не переполнилось.
-        # Если -z > max_val, то exp(-z) -> inf.
-        # Если -z < -max_val (то есть z > max_val), то exp(-z) -> 0.
-        # Нас беспокоит, когда -z становится большим положительным.
-
-        # Для ветки z >= 0:
-        # Если z очень большое положительное, то -z очень большое отрицательное, exp(-z) -> 0.
-        # Если z около 0, то -z около 0, exp(-z) около 1.
-        # Проблема возникает, когда z стремится к очень большому ОТРИЦАТЕЛЬНОМУ числу,
-        # но мы в ветке z >= 0.
-        # ПОЭТОМУ, скорее всего, ПЕРЕПОЛНЕНИЕ происходит, КОГДА z ОЧЕНЬ БОЛЬШОЕ ПОЛОЖИТЕЛЬНОЕ,
-        # и -z становится очень большим ОТРИЦАТЕЛЬНЫМ, а exp(-z) стремится к 0,
-        # но может возникнуть проблема с точностью или с делением на что-то около нуля.
-
-        # Давайте применим клипинг к самому z, чтобы избежать экстремальных значений.
-        # Это более надежный подход.
+        """Численно стабильная сигмоида."""
         z_clipped = np.clip(z, -max_val, max_val)
-
-        # Теперь используем z_clipped в сигмоиде
-        # Эта реализация должна быть более устойчивой.
         return np.where(z_clipped >= 0, 1 / (1 + np.exp(-z_clipped)), np.exp(z_clipped) / (np.exp(z_clipped) + 1))
 
-    def _predict_linear(self, X):
-        """Линейная комбинация весов и признаков."""
-        # Добавляем фиктивный признак для свободного члена (bias)
-        # Если у вас уже есть столбец единиц в X, этот шаг можно пропустить
-        # Но для минимальной реализации лучше добавить его явным образом
-        X_with_bias = np.hstack((X, np.ones((X.shape[0], 1))))
-        return np.dot(X_with_bias, self.weights)
-
-    def _predict_proba_internal(self, X):
-        """Внутренний метод предсказания вероятности (без добавления bias)."""
-        return self._sigmoid(np.dot(X, self.weights[:-1]) + self.weights[-1]) # bias - последний вес
-
     def _objective_function(self, weights):
-        """
-        Целевая функция (отрицательная логарифмическая правдоподобность)
-        для минимизации.
-        """
-        X_train_with_bias = np.hstack((self.X_train, np.ones((self.X_train.shape[0], 1))))
-        linear_output = np.dot(X_train_with_bias, weights)
-        predictions = self._sigmoid(linear_output)
+        """Целевая функция с расчетом аналитического градиента."""
+        w = weights[:-1]
+        b = weights[-1]
+        
+        z = np.dot(self.X_train_ext, w) + b
+        p = self._sigmoid(z)
 
-        # Добавляем небольшое значение к предсказаниям, чтобы избежать log(0)
         epsilon = 1e-9
-        predictions = np.clip(predictions, epsilon, 1. - epsilon)
+        p_clip = np.clip(p, epsilon, 1. - epsilon)
 
-        # Лосс-функция (кросс-энтропия)
-        loss = -np.mean(self.y_train * np.log(predictions) + (1 - self.y_train) * np.log(1 - predictions))
-        return loss
+        # Кросс-энтропия
+        loss = -np.mean(self.y_train * np.log(p_clip) + (1 - self.y_train) * np.log(1 - p_clip))
+        
+        # L2-регуляризация (Ridge)
+        loss += self.reg_lambda * np.sum(w ** 2)
 
-    def fit(self, optimizer='L-BFGS-B', maxiter=2000, tol=1e-4):
-        """
-        Обучает модель максимальной энтропии, находя оптимальные веса признаков.
+        # Расчет градиента
+        error = p - self.y_train
+        dw = np.dot(self.X_train_ext.T, error) / self.n_samples
+        dw += 2 * self.reg_lambda * w
+        db = np.mean(error)
 
-        Args:
-            optimizer (str): Алгоритм оптимизации. По умолчанию 'lbfgs'.
-                             Другие варианты: 'cg', 'newton-cg', 'nelder-mead' и др.
-            maxiter (int): Максимальное количество итераций для оптимизатора.
-            tol (float): Допустимая погрешность для остановки оптимизации.
-        """
-        print("Начало обучения модели MaxEnt...")
+        return loss, np.append(dw, db)
+
+    def fit(self, optimizer='L-BFGS-B', maxiter=2000, tol=1e-5):
+        print("Расширение признакового пространства (генерация сложных фичей)...")
+        self.X_train_ext = self._expand_features(self.X_train)
+        self.feature_mapping = self._get_feature_mapping()
         
-        # Добавляем фиктивный признак для свободного члена (bias) к обучающим данным
-        X_train_with_bias = np.hstack((self.X_train, np.ones((self.X_train.shape[0], 1))))
-        
-        n_weights = self.n_features + 1 # +1 для bias
-        
-        # Инициализируем веса нулями.
-        # Можно использовать другие стратегии инициализации, но для простоты - нули.
+        n_weights = self.X_train_ext.shape[1] + 1 # +1 для bias
         initial_weights = np.zeros(n_weights)
         
-        # Оптимизируем веса, минимизируя целевую функцию
+        print(f"Обучение весов MaxEnt ({n_weights-1} признаков)...")
         result = minimize(self._objective_function,
                           initial_weights,
                           method=optimizer,
-                          options={'maxiter': maxiter, 'gtol': tol}) # gtol - градиентная толерантность
+                          jac=True, # Используем аналитический градиент (очень быстро!)
+                          options={'maxiter': maxiter, 'gtol': tol})
         
         if not result.success:
             print(f"Предупреждение: Оптимизация не завершилась успешно: {result.message}")
 
         self.weights = result.x
-        print("Обучение завершено.")
 
-        # Вычисление важности признаков
-        # Для MaxEnt, важность признака можно аппроксимировать абсолютным значением его веса
-        # или квадратом веса. Здесь используем абсолютное значение.
-        # Bias не учитывается как отдельный признак важности
-        self._feature_importances_ = np.abs(self.weights[:-1])
+        # --- Математика MaxEnt: Расчет Z и Энтропии на фоновых точках ---
+        print("Калибровка распределения MaxEnt (расчет Z и энтропии)...")
+        X_bg_ext = self._expand_features(self.X_bg)
+        z_bg = np.dot(X_bg_ext, self.weights[:-1]) + self.weights[-1]
+        
+        # Нормировочная константа Z (log-sum-exp trick для избежания переполнения)
+        max_z = np.max(z_bg)
+        sum_exp = np.sum(np.exp(z_bg - max_z))
+        self.log_Z_ = max_z + np.log(sum_exp)
+        
+        # Вероятностное распределение на фоне
+        raw_bg = np.exp(z_bg - self.log_Z_)
+        # Энтропия H
+        self.entropy_ = -np.sum(raw_bg * np.log(raw_bg + 1e-15))
+
+        # --- Агрегация важности признаков ---
+        importances = np.zeros(self.n_features_orig)
+        w_abs = np.abs(self.weights[:-1])
+        
+        for i, mapped_indices in enumerate(self.feature_mapping):
+            for idx in mapped_indices:
+                importances[idx] += w_abs[i] / len(mapped_indices)
+        
+        sum_imp = np.sum(importances)
+        self._feature_importances_ = (importances / sum_imp) if sum_imp > 0 else importances
+        
+        print("Обучение завершено.")
 
     @property
     def feature_importances_(self):
-        """
-        Возвращает важность каждого признака.
-
-        Важность признака аппроксимируется абсолютным значением его веса
-        после обучения модели.
-        """
         if self._feature_importances_ is None:
             raise RuntimeError("Модель не была обучена. Вызовите метод .fit() сначала.")
         return self._feature_importances_
 
     def predict_proba(self, X):
-        """
-        Предсказывает вероятность присутствия вида в новых точках.
-
-        Args:
-            X (np.ndarray): Массив предикторов для новых точек.
-                            Форма: (n_new_points, n_features).
-
-        Returns:
-            np.ndarray: Массив вероятностей присутствия для каждой точки.
-                        Форма: (n_new_points,).
-        """
         X = np.asarray(X)
         if X.ndim == 1:
             X = X.reshape(-1, 1)
-        if X.shape[1] != self.n_features:
-            raise ValueError(f"Ожидалось {self.n_features} признаков, но получено {X.shape[1]}.")
+        if X.shape[1] != self.n_features_orig:
+            raise ValueError(f"Ожидалось {self.n_features_orig} исходных признаков, получено {X.shape[1]}.")
 
-        # Добавляем столбец единиц для свободного члена (bias)
-        X_with_bias = np.hstack((X, np.ones((X.shape[0], 1))))
-
-        # Линейная комбинация + сигмоида
-        # Здесь мы используем weights[:-1] для признаков и weights[-1] для bias
-        linear_model = np.dot(X, self.weights[:-1]) + self.weights[-1]
-        probabilities = self._sigmoid(linear_model)
+        # 1. Расширяем новые данные так же, как при обучении
+        X_ext = self._expand_features(X)
         
-        probabilities_absence = 1 - probabilities
+        # 2. Считаем линейный предиктор
+        z = np.dot(X_ext, self.weights[:-1]) + self.weights[-1]
+        
+        # 3. Вычисляем raw-вероятность MaxEnt (относительная пригодность)
+        raw = np.exp(z - self.log_Z_)
+        
+        # 4. Переводим в Logistic-формат (вероятность присутствия)
+        # Формула P = (e^H * raw) / (1 + e^H * raw)
+        c = np.exp(self.entropy_)
+        prob = (c * raw) / (1 + c * raw)
+        
+        # Защита от NaN
+        prob = np.nan_to_num(prob, nan=0.0, posinf=1.0, neginf=0.0)
+        prob = np.clip(prob, 0.0, 1.0)
 
-        return np.column_stack((probabilities_absence, probabilities))
-    
-    
+        return np.column_stack((1 - prob, prob))

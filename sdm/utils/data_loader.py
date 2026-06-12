@@ -25,6 +25,52 @@ def load_occurrences(df, lon_col, lat_col, month_col=''):
     return df
 
 
+def detect_and_read_csv(filename):
+    """
+    Автоматически определяет разделитель CSV файла на основе первой строки
+    и читает файл с помощью pandas.
+
+    Args:
+        filename (str): Путь к CSV файлу.
+
+    Returns:
+        pandas.DataFrame: DataFrame, содержащий данные из CSV файла.
+    """
+    delimiters = [',', ';', '\t']
+    detected_separator = '\t'  # Значение по умолчанию
+
+    with open(filename, 'r', encoding='utf-8') as f:
+        first_line = f.readline()
+
+    # Проверяем, какой из стандартных разделителей чаще встречается в первой строке
+    # и считаем, что это и есть основной разделитель.
+    # Мы гарантируем, что в файле минимум две колонки, т.е. есть хотя бы один разделитель.
+    separator_counts = {delim: first_line.count(delim) for delim in delimiters}
+
+    # Находим разделитель с максимальным количеством вхождений
+    # Если несколько разделителей имеют одинаковое максимальное количество,
+    # то приоритет будет у того, что раньше в списке delimiters (',', ';', '\t')
+    # Например, если первая строка ";;;", то ';' будет выбран.
+    # Если первая строка ",;,", то ',' будет выбран.
+    detected_separator = max(separator_counts, key=separator_counts.get)
+
+    # Если max вернул 0 (что маловероятно при наличии минимум одного разделителя),
+    # то мы остаемся на значении по умолчанию '\t'.
+    if separator_counts[detected_separator] == 0:
+        detected_separator = '\t'
+
+    print(f"Определен разделитель: '{detected_separator}'") # Опционально: для отладки
+
+    df = pd.read_csv(
+        filename,
+        sep=detected_separator,
+        index_col=False,
+        on_bad_lines='skip',
+        low_memory=False
+    )
+    return df
+
+
 def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME, CSV_FILENAME_ADD,
                                 CSV_FILTERED_FILENAME, MONTH_FILENAME, TEXT_FILENAME,
                                 IN_MIN_LON, IN_MIN_LAT, IN_MAX_LON, IN_MAX_LAT):
@@ -45,7 +91,8 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     with open(CSV_FILENAME, 'w') as f: # записываем файл
         f.write(IN_CSV)
         
-    df = pd.read_csv(CSV_FILENAME, sep="\t", index_col=False, on_bad_lines='skip', low_memory=False)
+    #df = pd.read_csv(CSV_FILENAME, sep="\t", index_col=False, on_bad_lines='skip', low_memory=False)
+    df = detect_and_read_csv(CSV_FILENAME)
     
     # вычисляем информацию о виде
     species = ''
@@ -124,7 +171,7 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     
     print(f"Осталось записей после фильтрации: {len(df)}")
     
-    # 2.2) группировка по месяцам
+    # 2.2) группировка по месяцам для таблички встреч
     print(f"-- 2.2. Группировка по месяцам ({IN_ID})")
     # здесь где-то перепутаны координаты!!!
     MONTH_COL = ''

@@ -3,15 +3,234 @@ import rasterio
 import math
 import os
 import rasterio.transform
+from rasterio.transform import from_bounds
 from rasterio.crs import CRS
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from scipy.ndimage import distance_transform_edt
-from scipy.stats import skew, kurtosis, pearsonr, chisquare
+from scipy.stats import skew, kurtosis, pearsonr, chisquare, spearmanr
 from scipy.spatial.distance import cosine
 import numpy as np
 import pyproj
+from pyproj import Transformer, CRS
 from shapely.geometry import shape
 from rasterio.features import shapes
+from scipy.ndimage import gaussian_filter
+
+
+def apply_decay_to_points(
+    input_tiff_path: str,
+    observation_rows: np.ndarray,
+    observation_cols: np.ndarray,
+    buffer_km: float,
+    decay_type: str = 'exponential',
+    decay_rate: float = 0.1 # Коэффициент затухания (k)
+):
+    """
+    Применяет пространственное затухание вокруг точек наблюдения.
+
+    Все точки в пределах 'buffer_km' (если decay_type='buffer') или
+    с учетом 'decay_rate' (для других типов затухания) будут изменены.
+    Точки за пределами 'buffer_km' (для 'buffer' типа) или с нулевым
+    значением затухания будут установлены в 0.
+
+    Args:
+        input_tiff_path (str): Путь к однослойному файлу GeoTIFF (EPSG:4326).
+        observation_rows (np.ndarray): Массив индексов строк (y-координат) точек наблюдения (EPSG:4326).
+        observation_cols (np.ndarray): Массив индексов столбцов (x-координат) точек наблюдения (EPSG:4326).
+        buffer_km (float): Максимальное расстояние в километрах, вокруг которого будет применяться затухание.
+                           Для decay_type='buffer' это жесткий буфер.
+                           Для других типов используется как начальный радиус или параметр.
+        decay_type (str): Тип затухания. Допустимые значения: 'buffer', 'exponential', 'inverse_quadratic', 'gaussian'.
+        decay_rate (float): Коэффициент затухания (k).
+                           - Для 'exponential': k в e^(-kd).
+                           - Для 'inverse_quadratic': k в 1/(1 + kd^2).
+                           - Для 'gaussian': sigma = 1 / (decay_rate * sqrt(2*pi)) или можно настроить как sigma.
+                                              Здесь я сделаю так, что decay_rate напрямую будет sigma.
+
+    Returns:
+        np.ndarray: Новый растр с примененным затуханием.
+    """
+
+    if decay_type not in ['buffer', 'exponential', 'inverse_quadratic', 'gaussian']:
+        raise ValueError("decay_type должен быть одним из: 'buffer', 'exponential', 'inverse_quadratic', 'gaussian'")
+
+    with rasterio.open(input_tiff_path) as src:
+        # Проверяем CRS растра
+        if src.crs != CRS.from_epsg(4326):
+            raise ValueError("Входной GeoTIFF должен быть в EPSG:4326")
+
+        # Загружаем данные растра
+        raster_data = src.read(1)
+        transform = src.transform
+        bounds = src.bounds
+
+        # Создаем копию данных для модификации
+        decayed_raster = np.copy(raster_data)
+
+        # Определяем CRS для вычислений расстояний
+        # Будем использовать WGS84 (EPSG:4326) и трансформер для геодезических расстояний
+        transformer = Transformer.from_crs("EPSG:4326", "EPSG:4326", always_xy=True)
+
+        # Преобразуем строки и столбцы в координаты (x, y)
+        # ИСПОЛЬЗОВАНИЕ АТРИБУТОВ AFFINE:
+        obs_coords = []
+        for row, col in zip(observation_rows, observation_cols):
+            x = transform.a * col + transform.b * row + transform.c
+            y = transform.d * col + transform.e * row + transform.f
+            obs_coords.append((x, y))
+        obs_lons = np.array([coord[0] for coord in obs_coords])
+        obs_lats = np.array([coord[1] for coord in obs_coords])
+
+        # Получаем координаты всех пикселей растра
+        rows_all, cols_all = np.indices(raster_data.shape)
+        #pixel_coords = [transform.xy(row, col) for row, col in zip(rows_all.flatten(), cols_all.flatten())]
+        pixel_coords = [rasterio.transform.xy(transform, row, col) for row, col in zip(rows_all.flatten(), cols_all.flatten())]
+        pixel_lons = np.array([coord[0] for coord in pixel_coords])
+        pixel_lats = np.array([coord[1] for coord in pixel_coords])
+
+        # Преобразуем массив пиксельных координат в 2D массив для удобства
+        pixel_coords_2d = np.vstack((pixel_lons, pixel_lats)).T
+        obs_coords_2d = np.vstack((obs_lons, obs_lats)).T
+
+        # Вычисляем расстояния от каждого пикселя до КАЖДОЙ точки наблюдения
+        # Это может быть ресурсоемко для больших растров и множества точек!
+        # Для оптимизации можно сначала вычислить расстояния до ближайшей точки наблюдения.
+
+        # ----- Оптимизация: Вычисление расстояния до ближайшей точки наблюдения -----
+        # Создадим массив расстояний, где каждый элемент - расстояние от пикселя
+        # до БЛИЖАЙШЕЙ точки наблюдения.
+
+        # Инициализируем массив расстояний очень большим числом
+        min_distances_km = np.full(raster_data.shape, np.inf, dtype=np.float64)
+        print(10)
+        # Проходим по каждой точке наблюдения и обновляем минимальное расстояние
+        for i, obs_coord in enumerate(obs_coords_2d):
+            # Вычисляем геодезическое расстояние от текущей точки наблюдения
+            # до всех пикселей растра.
+            # transformer.transform(lon1, lat1, lon2, lat2) возвращает (distance_in_meters, azimuth1, azimuth2)
+            # Нам нужно расстояние в метрах.
+            # Используем np.apply_along_axis для применения функции к каждой строке (пикселю)
+            # Важно: pyproj.Transformer.transform ожидает (lon, lat)
+            distances_meters = np.array([
+                transformer.transform(obs_coord[0], obs_coord[1], p_lon, p_lat)[0]
+                for p_lon, p_lat in pixel_coords_2d
+            ])
+
+            distances_km = distances_meters / 1000.0 # Переводим в километры
+
+            # Изменяем форму массива расстояний к форме растра
+            distances_km_reshaped = distances_km.reshape(raster_data.shape)
+
+            # Обновляем минимальное расстояние: min_distances_km[j, k] = min(min_distances_km[j, k], distances_km_reshaped[j, k])
+            min_distances_km = np.minimum(min_distances_km, distances_km_reshaped)
+
+        # Теперь min_distances_km содержит расстояние до ближайшей точки наблюдения для каждого пикселя.
+        # ----------------------------------------------------------------------------
+        print(20)
+        # Применение алгоритмов затухания
+        if decay_type == 'buffer':
+            # Жесткий буфер: все, что дальше buffer_km, становится 0
+            decayed_raster[min_distances_km > buffer_km] = 0
+            # Точки наблюдения, которые были изначально 1, должны остаться 1,
+            # но мы работаем с модификацией всего растра, так что это поведение
+            # уже учтено, если исходный растр содержал 1.
+            # Если мы хотим, чтобы НА ВСЕХ ПОВЕРХНОСТЯХ, которые сейчас 0,
+            # где есть точки наблюдения, но они дальше buffer, тоже стало 0,
+            # то это сделано.
+
+        elif decay_type == 'exponential':
+            # Функция: f(d) = exp(-decay_rate * d)
+            # Здесь d - это min_distances_km
+            # Устанавливаем значение 0 там, где d > buffer_km (чтобы не экспоненциально уменьшать далеко)
+            decay_factor = np.exp(-decay_rate * min_distances_km)
+            # Применяем буфер, чтобы обрезать влияние дальше buffer_km
+            decay_factor[min_distances_km > buffer_km] = 0
+            # Результат: исходные значения растра * коэффициент затухания
+            # Если исходные значения растра не 0 или 1, а представляют некоторую плотность,
+            # то это будет корректно. Если это бинарный растр (1 - есть, 0 - нет),
+            # то мы просто "размазываем" единицу.
+            decayed_raster = raster_data * decay_factor
+
+        elif decay_type == 'inverse_quadratic':
+            # Функция: f(d) = 1 / (1 + decay_rate * d^2)
+            decay_factor = 1 / (1 + decay_rate * (min_distances_km ** 2))
+            decay_factor[min_distances_km > buffer_km] = 0
+            decayed_raster = raster_data * decay_factor
+
+        elif decay_type == 'gaussian':
+            # Функция: f(d) = exp(-d^2 / (2 * sigma^2))
+            # Здесь sigma = decay_rate (можно настроить)
+            sigma = decay_rate
+            decay_factor = np.exp(-(min_distances_km ** 2) / (2 * (sigma ** 2)))
+            decay_factor[min_distances_km > buffer_km] = 0
+            decayed_raster = raster_data * decay_factor
+        print(30)
+        # Теперь надо убедиться, что пиксели, которые были изначально 0
+        # (и не попали под действие буфера), остаются 0.
+        # Иначе, если исходный растр был бинарным (1 - есть, 0 - нет),
+        # то умножение на коэффициент затухания (меньше 1)
+        # может оставить не-ноль там, где не должно быть.
+        #
+        # Если исходный растр - это бинарный растр присутствия (1/0),
+        # и мы хотим "размазать" эти единицы, то:
+        # 1. Инициализируем `decayed_raster` нулями.
+        # 2. Находим индексы, где `raster_data` == 1.
+        # 3. Для этих индексов вычисляем `decay_factor`.
+        # 4. Присваиваем `decayed_raster[indices] = decay_factor[indices]`.
+        #
+        # Давайте сделаем так: если исходный растр бинарный,
+        # то мы будем "размазывать" эти единицы.
+        print(40)
+        if np.all(np.unique(raster_data) <= 1): # Предполагаем бинарный растр (0 или 1)
+             # Если у нас точки наблюдения, которые должны быть 1,
+             # а остальное - 0, и мы хотим "размазать" эти 1.
+             # Мы уже вычислили `decay_factor`.
+             # Теперь применим его только там, где `raster_data` == 1.
+             # Но мы работаем с `min_distances_km`, поэтому лучше будет
+             # так:
+             # Создаем новый растр, заполненный нулями.
+             # Для каждого пикселя:
+             #   Если raster_data[px] == 1:
+             #     decayed_raster[px] = decay_factor[px]
+             #   Иначе:
+             #     decayed_raster[px] = 0
+             #
+             # Можно сделать это эффективнее:
+             # `decayed_raster = raster_data * decay_factor` уже сделано выше,
+             # но это может дать дробные значения там, где было 0.
+             #
+             # Исправим:
+             decayed_raster = np.zeros_like(raster_data, dtype=np.float32)
+             # Находим индексы, где исходный растр был 1
+             present_indices = (raster_data == 1)
+             # Применяем рассчитанный фактор затухания только к этим пикселям
+             decayed_raster[present_indices] = decay_factor[present_indices]
+
+        # Убедимся, что значения не выходят за разумные пределы (например, 0-1, если это вероятность)
+        # В зависимости от типа затухания, значения могут быть > 1 (если decay_rate очень мал)
+        # или < 0 (не должно произойти).
+        # Для 'inverse_quadratic' и 'exponential' значения будут от 0 до 1.
+        # Для 'gaussian' тоже от 0 до 1.
+        # Если растр исходный был с другими значениями, то здесь надо будет масштабировать.
+        # Для простоты, будем считать, что результат должен быть в диапазоне [0, 1]
+        # если исходный растр был бинарным.
+        decayed_raster = np.clip(decayed_raster, 0, 1)
+        print(50)
+
+        # Обновляем метаданные растра
+        out_meta = src.meta.copy()
+        out_meta.update({
+            "driver": "GTiff",
+            "dtype": rasterio.float32, # Для дробных значений
+            "nodata": 0.0 # Или другой подходящий NoData
+        })
+        
+        print(60)
+        
+        with rasterio.open(input_tiff_path, 'w', **out_meta) as dst:
+            dst.write(decayed_raster, 1)
+        print(f"Результат затухания записан в: {input_tiff_path}")
+    
 
 # Вспомогательная функция предсказания по стеку батчами
 def predict_suitability_for_stack(model, stack, valid_mask, batch_size=500_000):
@@ -561,3 +780,58 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
             f.write(f"\n{len(rows_random)},{len(rows_buffer)}")
     
     return all_rows, all_cols, rows_random, cols_random, rows_buffer, cols_buffer
+
+
+# Подсчёт метрики Бойса (Continuous Boyce Index - CBI)
+def continuous_boyce_index(obs, fit, num_bins=100, window_width=0.1):
+    """
+    Вычисляет Continuous Boyce Index (CBI) для оценки моделей Presence-Background.
+    Оценивает корреляцию между предсказанной пригодностью и частотой встреч вида.
+    
+    Args:
+        obs (array-like): Вероятности предсказаний для подтвержденных точек присутствия.
+        fit (array-like): Вероятности предсказаний для всех точек (ожидаемое распределение).
+        num_bins (int): Количество шагов смещения скользящего окна.
+        window_width (float): Ширина скользящего окна вероятности (например, 0.1).
+        
+    Returns:
+        float: Значение индекса Бойса от -1 до 1.
+    """
+    obs = np.asarray(obs)
+    fit = np.asarray(fit)
+    
+    obs = obs[~np.isnan(obs)]
+    fit = fit[~np.isnan(fit)]
+    
+    if len(obs) == 0 or len(fit) == 0:
+        return np.nan
+        
+    min_val = 0.0
+    max_val = 1.0
+    window_step = (max_val - min_val) / num_bins
+    if window_width < window_step:
+        window_width = window_step
+        
+    bin_starts = np.arange(min_val, max_val - window_width + window_step, window_step)
+    
+    f_ratios = []
+    bin_medians = []
+    total_obs = len(obs)
+    total_fit = len(fit)
+    
+    for start in bin_starts:
+        end = start + window_width
+        obs_in_bin = np.sum((obs >= start) & (obs <= end))
+        fit_in_bin = np.sum((fit >= start) & (fit <= end))
+        
+        if fit_in_bin > 0:
+            p_i = obs_in_bin / total_obs
+            e_i = fit_in_bin / total_fit
+            f_ratios.append(p_i / e_i)
+            bin_medians.append(start + window_width / 2.0)
+            
+    if len(f_ratios) < 2:
+        return np.nan
+        
+    cbi, _ = spearmanr(bin_medians, f_ratios)
+    return cbi
