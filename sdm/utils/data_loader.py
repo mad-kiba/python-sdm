@@ -11,79 +11,41 @@ from scipy.ndimage import distance_transform_edt
 from .plots import plot_geotiff_with_osm
 
 
-# Вспомогательная функция для приведения имен координат к единому стандарту
-def standardize_coord_names(d):
-    if 'Latitude' in d.columns:
-        d = d.rename(columns={'Latitude': 'lat', 'Longitude': 'lon'})
-    elif 'latitude' in d.columns:
-        d = d.rename(columns={'latitude': 'lat', 'longitude': 'lon'})
-    elif 'decimalLatitude' in d.columns:
-        d = d.rename(columns={'decimalLatitude': 'lat', 'decimalLongitude': 'lon'})
-    return d
-
-
-def load_occurrences(df, lon_col, lat_col, month_col=''): 
-    """Загружает CSV с наблюдениями, фильтрует некорректные координаты."""
-    if lon_col not in df.columns or lat_col not in df.columns:
-        raise ValueError(f"В CSV нет столбцов {lon_col}/{lat_col}")
-    
-    df.loc[:, lat_col] = df[lat_col].astype(float)
-    df.loc[:, lon_col] = df[lon_col].astype(float)
-    if month_col=='':
-        df = df[[lon_col, lat_col]]
-    else:
-        df = df[[lon_col, lat_col, month_col]]
-    df = df.dropna(subset=[lon_col, lat_col])
-    # Базовая фильтрация координат
-    df = df[(df[lon_col] >= -180) & (df[lon_col] <= 180) & (df[lat_col] >= -90) & (df[lat_col] <= 90)]
-    df = df.reset_index(drop=True)
-    return df
-
-
-def detect_and_read_csv(filename):
-    """
-    Автоматически определяет разделитель CSV файла на основе первой строки
-    и читает файл с помощью pandas.
-
-    Args:
-        filename (str): Путь к CSV файлу.
-
-    Returns:
-        pandas.DataFrame: DataFrame, содержащий данные из CSV файла.
-    """
-    delimiters = [',', ';', '\t']
-    detected_separator = '\t'  # Значение по умолчанию
-
-    with open(filename, 'r', encoding='utf-8') as f:
-        first_line = f.readline()
-
-    # Проверяем, какой из стандартных разделителей чаще встречается в первой строке
-    # и считаем, что это и есть основной разделитель.
-    # Мы гарантируем, что в файле минимум две колонки, т.е. есть хотя бы один разделитель.
-    separator_counts = {delim: first_line.count(delim) for delim in delimiters}
-
-    # Находим разделитель с максимальным количеством вхождений
-    # Если несколько разделителей имеют одинаковое максимальное количество,
-    # то приоритет будет у того, что раньше в списке delimiters (',', ';', '\t')
-    # Например, если первая строка ";;;", то ';' будет выбран.
-    # Если первая строка ",;,", то ',' будет выбран.
-    detected_separator = max(separator_counts, key=separator_counts.get)
-
-    # Если max вернул 0 (что маловероятно при наличии минимум одного разделителя),
-    # то мы остаемся на значении по умолчанию '\t'.
-    if separator_counts[detected_separator] == 0:
-        detected_separator = '\t'
-
-    print(f"Определен разделитель: '{detected_separator}'") # Опционально: для отладки
-
-    df = pd.read_csv(filename, sep=detected_separator, index_col=False, on_bad_lines='skip', low_memory=False)
-    return df
-
-
+# Основная функция загрузки, фильтрации и подготовки данных о встречаемости вида.
 def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME, CSV_FILENAME_ADD,
                                 CSV_FILTERED_FILENAME, MONTH_FILENAME, TEXT_FILENAME,
                                 IN_MIN_LON, IN_MIN_LAT, IN_MAX_LON, IN_MAX_LAT, 
                                 ALLOWED_COORD_UNCERTAIN, MINIMUM_YEAR_ALLOWED):
+    """
+    Основная функция загрузки, фильтрации и подготовки данных о встречаемости вида.
+    
+    Обрабатывает входные CSV файлы (в том числе сырые дампы строк), объединяет дополнительные
+    наблюдения, стандартизирует координаты, фильтрует мусорные точки (GBIF), применяет 
+    пространственные и временные фильтры, а также генерирует статистику по месяцам.
+    
+    Args:
+        IN_ID (int): Идентификатор задачи/модели.
+        IN_CSV (str): Путь к файлу CSV или сырая строка (дамп) с данными наблюдений.
+        IN_CSV_ADDITIONAL (str): Сырая строка с дополнительными данными наблюдений.
+        CSV_FILENAME (str): Путь для сохранения основного рабочего CSV файла.
+        CSV_FILENAME_ADD (str): Путь для сохранения дополнительного CSV файла.
+        CSV_FILTERED_FILENAME (str): Путь для сохранения отфильтрованного CSV.
+        MONTH_FILENAME (str): Путь для сохранения JSON со статистикой по месяцам.
+        TEXT_FILENAME (str): Путь для сохранения текстовой статистики.
+        IN_MIN_LON (float): Минимальная долгота (Bounding Box).
+        IN_MIN_LAT (float): Минимальная широта (Bounding Box).
+        IN_MAX_LON (float): Максимальная долгота (Bounding Box).
+        IN_MAX_LAT (float): Максимальная широта (Bounding Box).
+        ALLOWED_COORD_UNCERTAIN (float): Максимально допустимая неопределенность координат (в метрах).
+        MINIMUM_YEAR_ALLOWED (int): Минимально допустимый год наблюдения.
+        
+    Returns:
+        dict: Словарь с результатами: колонки координат, очищенный DataFrame, финальные
+              точки присутствия (occ), статус и извлеченная таксономия (species, kingdom, class).
+              
+    Raises:
+        ValueError: При ошибках чтения файлов, пустых данных или отсутствии достаточного числа валидных точек.
+    """
     
     try:
         # Защита от OSError (File name too long) при передаче длинных сырых строк
@@ -218,10 +180,132 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     return {'LAT_COL': LAT_COL, 'LON_COL': LON_COL, 'df': df, 'occ': occ, 'status': 'done', 'species': species, 'kingdom': kingdom, 'dclass': dclass}
 
 
+# Вспомогательная функция для приведения имен координат к единому стандарту.
+def standardize_coord_names(d):
+    """
+    Приводит названия колонок с координатами в DataFrame к единому стандарту ('lat' и 'lon').
+    
+    Args:
+        d (pandas.DataFrame): Входной DataFrame, содержащий колонки с координатами.
+        
+    Returns:
+        pandas.DataFrame: DataFrame со стандартизированными названиями колонок.
+    """
+    if 'Latitude' in d.columns:
+        d = d.rename(columns={'Latitude': 'lat', 'Longitude': 'lon'})
+    elif 'latitude' in d.columns:
+        d = d.rename(columns={'latitude': 'lat', 'longitude': 'lon'})
+    elif 'decimalLatitude' in d.columns:
+        d = d.rename(columns={'decimalLatitude': 'lat', 'decimalLongitude': 'lon'})
+    return d
+
+
+# Загружает DataFrame с наблюдениями, очищает и фильтрует некорректные координаты.
+def load_occurrences(df, lon_col, lat_col, month_col=''): 
+    """
+    Загружает DataFrame с наблюдениями, очищает и фильтрует некорректные координаты.
+    
+    Удаляет строки с пропущенными координатами и отфильтровывает точки, 
+    выходящие за пределы допустимых географических значений (-180..180, -90..90).
+    
+    Args:
+        df (pandas.DataFrame): Исходный DataFrame с данными наблюдений.
+        lon_col (str): Название колонки с долготой.
+        lat_col (str): Название колонки с широтой.
+        month_col (str, optional): Название колонки с месяцем наблюдения. По умолчанию ''.
+        
+    Returns:
+        pandas.DataFrame: Отфильтрованный DataFrame, содержащий только валидные координаты.
+        
+    Raises:
+        ValueError: Если в DataFrame отсутствуют указанные колонки координат.
+    """
+    if lon_col not in df.columns or lat_col not in df.columns:
+        raise ValueError(f"В CSV нет столбцов {lon_col}/{lat_col}")
+    
+    df.loc[:, lat_col] = df[lat_col].astype(float)
+    df.loc[:, lon_col] = df[lon_col].astype(float)
+    if month_col=='':
+        df = df[[lon_col, lat_col]]
+    else:
+        df = df[[lon_col, lat_col, month_col]]
+    df = df.dropna(subset=[lon_col, lat_col])
+    # Базовая фильтрация координат
+    df = df[(df[lon_col] >= -180) & (df[lon_col] <= 180) & (df[lat_col] >= -90) & (df[lat_col] <= 90)]
+    df = df.reset_index(drop=True)
+    return df
+
+
+# Автоматически определяет разделитель CSV файла на основе первой строки и читает файл с помощью pandas.
+def detect_and_read_csv(filename):
+    """
+    Автоматически определяет разделитель CSV файла на основе первой строки
+    и читает файл с помощью pandas.
+
+    Args:
+        filename (str): Путь к CSV файлу.
+
+    Returns:
+        pandas.DataFrame: DataFrame, содержащий данные из CSV файла.
+    """
+    delimiters = [',', ';', '\t']
+    detected_separator = '\t'  # Значение по умолчанию
+
+    with open(filename, 'r', encoding='utf-8') as f:
+        first_line = f.readline()
+
+    # Проверяем, какой из стандартных разделителей чаще встречается в первой строке
+    # и считаем, что это и есть основной разделитель.
+    # Мы гарантируем, что в файле минимум две колонки, т.е. есть хотя бы один разделитель.
+    separator_counts = {delim: first_line.count(delim) for delim in delimiters}
+
+    # Находим разделитель с максимальным количеством вхождений
+    # Если несколько разделителей имеют одинаковое максимальное количество,
+    # то приоритет будет у того, что раньше в списке delimiters (',', ';', '\t')
+    # Например, если первая строка ";;;", то ';' будет выбран.
+    # Если первая строка ",;,", то ',' будет выбран.
+    detected_separator = max(separator_counts, key=separator_counts.get)
+
+    # Если max вернул 0 (что маловероятно при наличии минимум одного разделителя),
+    # то мы остаемся на значении по умолчанию '\t'.
+    if separator_counts[detected_separator] == 0:
+        detected_separator = '\t'
+
+    print(f"Определен разделитель: '{detected_separator}'") # Опционально: для отладки
+
+    df = pd.read_csv(filename, sep=detected_separator, index_col=False, on_bad_lines='skip', low_memory=False)
+    return df
+
+
+# Основная функция загрузки слоёв GeoTIFF с предикторами окружающей среды.
 def load_environmental_predictors(raster_dir, predictors = 'all', period='current', interval='', scales='', 
                                   bio_info='', base_period='1981-2010'):
-    """Считывает все GeoTIFF из папки и строит стек (bands, H, W).
-       Возвращает: stack(float32), valid_mask(bool), transform, crs, profile, band_names(list)"""
+    """
+    Загружает слои GeoTIFF с предикторами окружающей среды и формирует 3D стек (матрицу).
+    
+    Автоматически определяет статические и динамические предикторы, выравнивает их,
+    заменяет значения NoData на NaN, а также выполняет экстраполяцию значений
+    прибрежной зоны на водные пространства для устранения артефактов на границах суши.
+    
+    Args:
+        raster_dir (str): Корневая директория с растрами предикторов.
+        predictors (str, optional): Строка с названиями нужных предикторов через запятую, 
+                                    либо 'all' для загрузки всех. По умолчанию 'all'.
+        period (str, optional): Период моделирования ('current', 'future', 'monthly'). По умолчанию 'current'.
+        interval (str, optional): Дополнительный интервал/сценарий (например, сценарий SSP для будущего).
+        scales (dict, optional): Словарь с параметрами масштабирования предикторов.
+        bio_info (dict, optional): Словарь с метаданными предикторов (единицы измерения, лимиты).
+        base_period (str, optional): Базовый период для замены в названиях файлов (например, '1981-2010').
+        
+    Returns:
+        tuple: (stack, valid_mask, ref_transform, ref_crs, profile, band_names, band_paths)
+            stack (np.ndarray): 3D массив (стек) со значениями предикторов (bands, H, W).
+            valid_mask (np.ndarray): 2D булева маска валидных пикселей.
+            
+    Raises:
+        FileNotFoundError: Если необходимые растры не найдены в директории.
+        ValueError: Если найденные растры имеют различное разрешение, размеры или CRS.
+    """
     
     # У нас предикторы делятся на статические и динамические.
     # Для моделирования настоящего - объединяем их.
@@ -379,7 +463,7 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
 
     # Маска валидных пикселей: валиден, если нет NaN во всех слоях
     valid_mask = ~np.isnan(stack[0])
-    # Теперь валидна не вся карта BBox, а только суша + 50км прибрежной зоны
+    # Теперь валидна не вся карта BBox, а только суша + 50 точек прибрежной зоны
 
     # Профиль для сохранения результата
     
