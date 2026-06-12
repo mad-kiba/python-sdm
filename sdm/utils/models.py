@@ -17,8 +17,9 @@ class MaxEnt:
         reg_lambda (float): Коэффициент L2-регуляризации для предотвращения переобучения.
     """
     def __init__(self, X_pres, X_bg, add_quadratic=True, add_product=False, reg_lambda=0.01):
-        self.X_pres = np.asarray(X_pres)
-        self.X_bg = np.asarray(X_bg)
+        # Принудительно используем float64 для избежания проблем с точностью в scipy.optimize
+        self.X_pres = np.asarray(X_pres, dtype=np.float64)
+        self.X_bg = np.asarray(X_bg, dtype=np.float64)
 
         if self.X_pres.ndim == 1:
             self.X_pres = self.X_pres.reshape(-1, 1)
@@ -176,16 +177,13 @@ class MaxEnt:
         # 2. Считаем линейный предиктор
         z = np.dot(X_ext, self.weights[:-1]) + self.weights[-1]
         
-        # 3. Вычисляем raw-вероятность MaxEnt (относительная пригодность)
-        raw = np.exp(z - self.log_Z_)
+        # 3. Вычисляем итоговую вероятность (Logistic Output)
+        # Математическое упрощение: 
+        # P = (e^H * raw) / (1 + e^H * raw), где raw = e^(z - Z)
+        # Эквивалентно P = 1 / (1 + e^-(H + z - Z))
+        # Это позволяет избежать ошибки 'inf / inf = NaN', если z очень большое.
         
-        # 4. Переводим в Logistic-формат (вероятность присутствия)
-        # Формула P = (e^H * raw) / (1 + e^H * raw)
-        c = np.exp(self.entropy_)
-        prob = (c * raw) / (1 + c * raw)
-        
-        # Защита от NaN
-        prob = np.nan_to_num(prob, nan=0.0, posinf=1.0, neginf=0.0)
-        prob = np.clip(prob, 0.0, 1.0)
+        eta = self.entropy_ + z - self.log_Z_
+        prob = self._sigmoid(eta)
 
         return np.column_stack((1 - prob, prob))
