@@ -1,5 +1,3 @@
-# to optimize
-
 # sdm/utils/preprocessing.py
 # Библиотека PythonSDM для моделирования распространения видов
 # - набор функций для предобработки слоёв биогеографической информации
@@ -113,7 +111,7 @@ def process_single_geotiff(input_filepath: str, output_dir: str, target_crs: str
                 crs=target_crs,
                 transform=final_transform,
                 nodata=safe_nodata, # Явно задаем безопасный nodata
-                compress='LZW',
+                compress='lzw',
                 tiled=True
             ) as final_dst:
                 # Выполняем репроецирование с учетом точной целевой трансформации и границ
@@ -131,6 +129,7 @@ def process_single_geotiff(input_filepath: str, output_dir: str, target_crs: str
                 
             
             # 3. Проверяем, есть ли маска валидности в исходном файле
+            # Этот блок больше не нужен, т.к. мы ориентируемся на значения nodata в предикторах.
             #masked_data = src.read(1, masked=True)
             #if masked_data.mask.any():
             #    print("  Репроецирование маски валидности...")
@@ -180,6 +179,25 @@ def process_single_geotiff(input_filepath: str, output_dir: str, target_crs: str
 # Проходит по каждому "сырому" слою предикторов и готовит его к модели.
 def clip_rasters(RAW_RASTER_DIR, OUTPUT_RASTER_DIR, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MAX_LON,
                  MODEL_FUTURE, MODEL_PAST, MODEL_SEASON, IN_RESOLUTION):
+    """
+    Проходит по директориям с "сырыми" предикторами, обрабатывает их (репроецирует, обрезает)
+    и сохраняет готовые GeoTIFF в выходную директорию.
+
+    Args:
+        RAW_RASTER_DIR (str): Путь к корневой папке с исходными растрами.
+        OUTPUT_RASTER_DIR (str): Путь к папке для сохранения обрезанных растров.
+        IN_MIN_LAT (float): Минимальная широта (нижняя граница BBox).
+        IN_MIN_LON (float): Минимальная долгота (левая граница BBox).
+        IN_MAX_LAT (float): Максимальная широта (верхняя граница BBox).
+        IN_MAX_LON (float): Максимальная долгота (правая граница BBox).
+        MODEL_FUTURE (int): Флаг (1/0) обработки предикторов для будущего.
+        MODEL_PAST (int): Флаг (1/0) обработки предикторов для прошлого.
+        MODEL_SEASON (int): Флаг (1/0) обработки помесячных (сезонных) предикторов.
+        IN_RESOLUTION (str): Строковое обозначение целевого разрешения ('30s', '1m', '5m').
+
+    Raises:
+        ValueError: Если передано неподдерживаемое разрешение.
+    """
     if IN_MIN_LAT==0:
         return
     
@@ -258,11 +276,27 @@ def clip_rasters(RAW_RASTER_DIR, OUTPUT_RASTER_DIR, IN_MIN_LAT, IN_MIN_LON, IN_M
 
 # Преобразует координаты (lon, lat) в индексы пикселей (row, col).
 def points_to_pixel_indices(lons, lats, transform, width, height):
-    """Преобразует координаты (lon, lat) в индексы пикселей (row, col).
-       Возвращает row, col и маску тех, кто внутри границ растра."""
-    # rasterio.transform.rowcol даёт целые индексы (row, col) для x,y
-    from rasterio.transform import rowcol
-    rows, cols = rowcol(transform, lons, lats, op=float)  # float -> потом приведём к int с проверкой
+    """
+    Преобразует географические координаты (lon, lat) в целочисленные индексы пикселей (row, col).
+
+    Выполняет векторизованное преобразование через обратную аффинную матрицу.
+    Отбрасывает дробную часть для получения "корзины" (пикселя), в которую попадает точка.
+
+    Args:
+        lons (np.ndarray): Массив долгот (x-координаты).
+        lats (np.ndarray): Массив широт (y-координаты).
+        transform (affine.Affine): Аффинная матрица трансформации растра.
+        width (int): Ширина растра (количество столбцов).
+        height (int): Высота растра (количество строк).
+
+    Returns:
+        tuple: (rows, cols, inside)
+            - rows (np.ndarray): Массив целочисленных индексов строк.
+            - cols (np.ndarray): Массив целочисленных индексов столбцов.
+            - inside (np.ndarray): Булева маска (какие точки внутри растра).
+    """
+    inv_transform = ~transform
+    cols, rows = inv_transform * (lons, lats)
     rows = np.floor(rows).astype(int)
     cols = np.floor(cols).astype(int)
     inside = (rows >= 0) & (rows < height) & (cols >= 0) & (cols < width)

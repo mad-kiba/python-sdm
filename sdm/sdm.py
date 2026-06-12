@@ -1,3 +1,5 @@
+# to optimize
+
 # sdm/sdm.py
 # Библиотека PythonSDM для моделирования распространения видов
 
@@ -97,7 +99,8 @@ class PythonSDM:
         self.ALLOWED_COORD_UNCERTAIN = 1000
         
         # начиная с какого года используем данные
-        self.MINIMUM_YEAR_ALLOWED = 1980
+        #self.MINIMUM_YEAR_ALLOWED = 1980
+        self.MINIMUM_YEAR_ALLOWED = 2000
 
         # начали
         np.random.seed(self.RANDOM_SEED)

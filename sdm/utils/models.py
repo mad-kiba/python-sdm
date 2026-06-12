@@ -1,3 +1,7 @@
+# sdm/utils/models.py
+# Библиотека PythonSDM для моделирования распространения видов
+# - модель MaxEnt
+
 import numpy as np
 from scipy.optimize import minimize
 

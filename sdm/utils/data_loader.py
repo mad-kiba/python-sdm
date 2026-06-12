@@ -1,3 +1,7 @@
+# sdm/utils/data_loader.py
+# Библиотека PythonSDM для моделирования распространения видов
+# - набор функций для предобработки и загрузки наблюдательных данных
+
 import os
 import pandas as pd
 import numpy as np

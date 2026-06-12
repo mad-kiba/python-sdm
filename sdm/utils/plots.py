@@ -1,5 +1,3 @@
-# to optimize
-
 # sdm/utils/plots.py
 # Библиотека PythonSDM для моделирования распространения видов
 # - набор функций для постройки графиков и карт
@@ -788,7 +786,7 @@ def add_stats_to_plot(ax: plt.Axes, stats: dict, stats_pred: dict, y_pos: float,
         
         f"  Сравнение:\n"
         f"  Broad: {broad}\n"
-        f"  Simil: {simil}"
+        f"  Sch.D: {simil}"
     )
 
     # Помещаем текст справа от гистограммы.
