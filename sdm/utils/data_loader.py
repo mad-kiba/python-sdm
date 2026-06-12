@@ -126,7 +126,11 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
         df = pd.concat([df, df2_filtered], ignore_index=True)
         
         print(f"Записей после дозагрузки: {len(df)}, из них дозагружено: {len(df2)}")
-            
+    
+    # записываем в файл со статистикой общее число входных наблюдений до фильтрации
+    total_obs_in_csv = len(df)
+    with open(TEXT_FILENAME, 'a') as f:
+        f.write(f"{total_obs_in_csv}")
     
     # вычисление полей с координатами
     LAT_COL = 'lat'
@@ -203,14 +207,11 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     
     # 2.3) финальные присустсвия
     print(f"-- 2.3. Финальные присутствия ({IN_ID})")
-    occ = load_occurrences(df, LON_COL, LAT_COL, MONTH_COL)
+    occ = load_occurrences(df_coord_filtered, LON_COL, LAT_COL, MONTH_COL)
     print("\n-- Обработка наблюдений")
     print(f"Осталось записей финально CSV: {len(occ)}")
     
     df_coord_filtered.to_csv(CSV_FILTERED_FILENAME, index=False)
-    
-    with open(TEXT_FILENAME, 'a') as f:
-        f.write(f"{len(occ)}")
     
     if len(occ)==0:
         print('Not enough points')
