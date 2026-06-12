@@ -25,8 +25,9 @@ from sklearn.calibration import CalibratedClassifierCV
 # Импорт функций из utils
 from .utils.preprocessing import clip_rasters, points_to_pixel_indices, pixel_indices_to_points
 from .utils.data_loader import load_species_occurrence_data, load_environmental_predictors
-from .utils.utils import sample_background, extract_features_from_stack, inverse_scale, apply_decay_to_points, continuous_boyce_index
+from .utils.utils import sample_background, extract_features_from_stack, inverse_scale, continuous_boyce_index
 from .utils.utils import save_geotiff, predict_suitability_for_stack, save_error, get_geotiff_square
+from .utils.utils import apply_decay_to_points, calculate_niche_breadth_pca
 from .utils.plots import create_beautiful_histogram, draw_map, create_animated_gif, create_avi_from_images, plot_roc_auc_curve
 from .utils.models import MaxEnt
 from .utils.predictors_info import get_predictors_info
@@ -634,25 +635,29 @@ class PythonSDM:
             print('Ошибка оценки качества модели')
             print(e)
         
+        # --- Важность переменных и Экологическая пластичность (Niche Breadth) ---
+        # Наша новая версия MaxEnt теперь тоже поддерживает свойство feature_importances_
+        importances = self.model.feature_importances_
+        
+        # Находим индексы Топ-5 самых важных предикторов
+        top5_idx = np.argsort(importances)[::-1][:5]
+        
+        self.pca_breadth = calculate_niche_breadth_pca(self.X_pres, self.X_bg, top_indices=top5_idx)
+        print(f"Многомерная экологическая пластичность (PCA Niche Breadth, top-5): {self.pca_breadth:.4f}")
+        
+        
         # Если это основной прогон - записываем метрики
         if month==0:
             with open(self.TEXT_FILENAME, 'a') as f:
                 f.write(f"\n{self.auc:.3f},{self.tss:.3f},{self.kappa:.3f},{self.TN:.3f},{self.FP:.3f},{self.TP:.3f},{self.FN:.3f},{self.optimal_threshold:.3f},")
                 f.write(f"{self.sensitivity:.3f},{self.specificity:.3f},{self.fdr:.3f},{self.for_rate:.3f},{self.ppv:.3f},{self.npv:.3f},")
-                f.write(f"{self.bias_score:.3f},{self.csi:.3f},{self.accuracy:.3f},{self.misclassification_rate:.3f},{self.boyce_index:.3f}")
-
+                f.write(f"{self.bias_score:.3f},{self.csi:.3f},{self.accuracy:.3f},{self.misclassification_rate:.3f},{self.boyce_index:.3f},{self.pca_breadth:.4f}")
                 
                 if self.species!='':
                     title = self.species
                     f.write(f"\n{title}")
                 else:
                     f.write(f"\nне определён")
-        
-        # Важность переменных
-        if (self.IN_MODEL=='MaxEnt'):
-            importances = self.model.weights
-        else:
-            importances = self.model.feature_importances_
         
         if month==0:
             print("Важность предикторов:")

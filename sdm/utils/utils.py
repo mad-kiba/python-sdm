@@ -13,6 +13,9 @@ from rasterio.crs import CRS
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from scipy.ndimage import distance_transform_edt
 from scipy.stats import skew, kurtosis, pearsonr, spearmanr
+from scipy.spatial import ConvexHull
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
 
 
 # Применяет пространственное затухание вокруг точек наблюдения.
@@ -416,7 +419,53 @@ def calculate_histogram_similarity(data_obs, data_full, bins_num=50, sig_figs=4)
     # посоветовали использовать Schoener's D для оценки похожести гистограмм
     schoeners_d = 1.0 - 0.5 * np.sum(np.abs(density_obs - density_full))
     return round_to_significant_figures(schoeners_d, sig_figs)
-    #return round_to_significant_figures(correlation, sig_figs)
+
+
+# Рассчитывает многомерную экологическую пластичность (Niche Breadth).
+def calculate_niche_breadth_pca(X_pres: np.ndarray, X_bg: np.ndarray, top_indices: list = None) -> float:
+    """
+    Рассчитывает многомерную экологическую пластичность (Niche Breadth) 
+    на основе площади минимального выпуклого многоугольника (MCP) 
+    в пространстве первых двух главных компонент (PCA).
+    
+    Args:
+        X_pres (np.ndarray): Матрица предикторов в точках присутствия.
+        X_bg (np.ndarray): Матрица предикторов для фоновых точек (весь доступный ландшафт).
+        top_indices (list, optional): Индексы колонок топ-предикторов. Если None, используются все.
+        
+    Returns:
+        float: Значение пластичности от 0.0 (экстремальный специалист) до 1.0+ (генералист).
+    """
+    if len(X_pres) < 3 or len(X_bg) < 3:
+        return 0.0 # Для построения 2D полигона нужно минимум 3 точки
+        
+    if top_indices is not None:
+        X_pres_sub = X_pres[:, top_indices]
+        X_bg_sub = X_bg[:, top_indices]
+    else:
+        X_pres_sub = X_pres
+        X_bg_sub = X_bg
+        
+    # 1. Стандартизация (Z-score) на основе доступного фона
+    scaler = StandardScaler()
+    scaler.fit(np.vstack([X_bg_sub, X_pres_sub]))
+    X_bg_scaled = scaler.transform(X_bg_sub)
+    X_pres_scaled = scaler.transform(X_pres_sub)
+    
+    # 2. PCA (сжатие до 2-х измерений)
+    pca = PCA(n_components=2)
+    pca.fit(X_bg_scaled) # Обучаем PCA на фоне (чтобы оси отражали макроклимат)
+    
+    bg_pca = pca.transform(X_bg_scaled)
+    pres_pca = pca.transform(X_pres_scaled)
+    
+    # 3. Вычисление площадей Convex Hull (Выпуклых оболочек)
+    try:
+        area_bg = ConvexHull(bg_pca).volume # В 2D пространстве volume возвращает площадь
+        area_pres = ConvexHull(pres_pca).volume
+        return float(area_pres / area_bg) if area_bg > 0 else 0.0
+    except Exception:
+        return 0.0
 
 
 # Вычисляет основные статистические показатели для набора данных.

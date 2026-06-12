@@ -5,4 +5,4 @@ from sdm.sdm import PythonSDM
 #from sdm.core.preprocessing import clip_rasters
 #from sdm.core.utils.plot_utils import draw_map, create_beautiful_histogram
 
-__version__ = "0.8" # Указываем версию библиотеки
+__version__ = "0.9" # Указываем версию библиотеки
