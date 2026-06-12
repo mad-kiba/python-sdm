@@ -8,21 +8,14 @@ import numpy as np
 import rasterio
 import math
 import os
-import rasterio.transform
-from rasterio.transform import from_bounds
+import pyproj
 from rasterio.crs import CRS
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from scipy.ndimage import distance_transform_edt
-from scipy.stats import skew, kurtosis, pearsonr, chisquare, spearmanr
-from scipy.spatial.distance import cosine
-import numpy as np
-import pyproj
-from pyproj import Transformer, CRS
-from shapely.geometry import shape
-from rasterio.features import shapes
-from scipy.ndimage import gaussian_filter
+from scipy.stats import skew, kurtosis, pearsonr, spearmanr
 
 
+# Применяет пространственное затухание вокруг точек наблюдения.
 def apply_decay_to_points(
     input_tiff_path: str,
     observation_rows: np.ndarray,
@@ -73,66 +66,29 @@ def apply_decay_to_points(
         # Создаем копию данных для модификации
         decayed_raster = np.copy(raster_data)
 
-        # Определяем CRS для вычислений расстояний
-        # Будем использовать WGS84 (EPSG:4326) и трансформер для геодезических расстояний
-        transformer = Transformer.from_crs("EPSG:4326", "EPSG:4326", always_xy=True)
+        # ----- Сверхбыстрая оптимизация: Вычисление расстояний через EDT -----
+        # 1. Создаем бинарную маску точек присутствия
+        presence_mask = np.zeros(raster_data.shape, dtype=bool)
+        presence_mask[observation_rows, observation_cols] = True
+        
+        # 2. Матрица для EDT (0 для присутствий, inf для фона)
+        distance_array = np.full(raster_data.shape, np.inf, dtype=np.float32)
+        distance_array[presence_mask] = 0.0
+        
+        # 3. Вычисляем расстояние в ПИКСЕЛЯХ
+        distances_pixels = distance_transform_edt(distance_array)
+        
+        # 4. Оцениваем физический размер пикселя (в км) в центре растра для масштабирования
+        geod = pyproj.Geod(ellps='WGS84')
+        mid_row = raster_data.shape[0] // 2
+        lon1, lat1 = transform * (0, mid_row)
+        lon2, lat2 = transform * (1, mid_row)
+        _, _, pixel_size_m = geod.inv(lon1, lat1, lon2, lat2)
+        pixel_size_km = abs(pixel_size_m) / 1000.0
+        
+        # 5. Переводим пиксели в километры
+        min_distances_km = distances_pixels * pixel_size_km
 
-        # Преобразуем строки и столбцы в координаты (x, y)
-        # ИСПОЛЬЗОВАНИЕ АТРИБУТОВ AFFINE:
-        obs_coords = []
-        for row, col in zip(observation_rows, observation_cols):
-            x = transform.a * col + transform.b * row + transform.c
-            y = transform.d * col + transform.e * row + transform.f
-            obs_coords.append((x, y))
-        obs_lons = np.array([coord[0] for coord in obs_coords])
-        obs_lats = np.array([coord[1] for coord in obs_coords])
-
-        # Получаем координаты всех пикселей растра
-        rows_all, cols_all = np.indices(raster_data.shape)
-        #pixel_coords = [transform.xy(row, col) for row, col in zip(rows_all.flatten(), cols_all.flatten())]
-        pixel_coords = [rasterio.transform.xy(transform, row, col) for row, col in zip(rows_all.flatten(), cols_all.flatten())]
-        pixel_lons = np.array([coord[0] for coord in pixel_coords])
-        pixel_lats = np.array([coord[1] for coord in pixel_coords])
-
-        # Преобразуем массив пиксельных координат в 2D массив для удобства
-        pixel_coords_2d = np.vstack((pixel_lons, pixel_lats)).T
-        obs_coords_2d = np.vstack((obs_lons, obs_lats)).T
-
-        # Вычисляем расстояния от каждого пикселя до КАЖДОЙ точки наблюдения
-        # Это может быть ресурсоемко для больших растров и множества точек!
-        # Для оптимизации можно сначала вычислить расстояния до ближайшей точки наблюдения.
-
-        # ----- Оптимизация: Вычисление расстояния до ближайшей точки наблюдения -----
-        # Создадим массив расстояний, где каждый элемент - расстояние от пикселя
-        # до БЛИЖАЙШЕЙ точки наблюдения.
-
-        # Инициализируем массив расстояний очень большим числом
-        min_distances_km = np.full(raster_data.shape, np.inf, dtype=np.float64)
-        print(10)
-        # Проходим по каждой точке наблюдения и обновляем минимальное расстояние
-        for i, obs_coord in enumerate(obs_coords_2d):
-            # Вычисляем геодезическое расстояние от текущей точки наблюдения
-            # до всех пикселей растра.
-            # transformer.transform(lon1, lat1, lon2, lat2) возвращает (distance_in_meters, azimuth1, azimuth2)
-            # Нам нужно расстояние в метрах.
-            # Используем np.apply_along_axis для применения функции к каждой строке (пикселю)
-            # Важно: pyproj.Transformer.transform ожидает (lon, lat)
-            distances_meters = np.array([
-                transformer.transform(obs_coord[0], obs_coord[1], p_lon, p_lat)[0]
-                for p_lon, p_lat in pixel_coords_2d
-            ])
-
-            distances_km = distances_meters / 1000.0 # Переводим в километры
-
-            # Изменяем форму массива расстояний к форме растра
-            distances_km_reshaped = distances_km.reshape(raster_data.shape)
-
-            # Обновляем минимальное расстояние: min_distances_km[j, k] = min(min_distances_km[j, k], distances_km_reshaped[j, k])
-            min_distances_km = np.minimum(min_distances_km, distances_km_reshaped)
-
-        # Теперь min_distances_km содержит расстояние до ближайшей точки наблюдения для каждого пикселя.
-        # ----------------------------------------------------------------------------
-        print(20)
         # Применение алгоритмов затухания
         if decay_type == 'buffer':
             # Жесткий буфер: все, что дальше buffer_km, становится 0
@@ -170,68 +126,24 @@ def apply_decay_to_points(
             decay_factor = np.exp(-(min_distances_km ** 2) / (2 * (sigma ** 2)))
             decay_factor[min_distances_km > buffer_km] = 0
             decayed_raster = raster_data * decay_factor
-        print(30)
-        # Теперь надо убедиться, что пиксели, которые были изначально 0
-        # (и не попали под действие буфера), остаются 0.
-        # Иначе, если исходный растр был бинарным (1 - есть, 0 - нет),
-        # то умножение на коэффициент затухания (меньше 1)
-        # может оставить не-ноль там, где не должно быть.
-        #
-        # Если исходный растр - это бинарный растр присутствия (1/0),
-        # и мы хотим "размазать" эти единицы, то:
-        # 1. Инициализируем `decayed_raster` нулями.
-        # 2. Находим индексы, где `raster_data` == 1.
-        # 3. Для этих индексов вычисляем `decay_factor`.
-        # 4. Присваиваем `decayed_raster[indices] = decay_factor[indices]`.
-        #
-        # Давайте сделаем так: если исходный растр бинарный,
-        # то мы будем "размазывать" эти единицы.
-        print(40)
-        if np.all(np.unique(raster_data) <= 1): # Предполагаем бинарный растр (0 или 1)
-             # Если у нас точки наблюдения, которые должны быть 1,
-             # а остальное - 0, и мы хотим "размазать" эти 1.
-             # Мы уже вычислили `decay_factor`.
-             # Теперь применим его только там, где `raster_data` == 1.
-             # Но мы работаем с `min_distances_km`, поэтому лучше будет
-             # так:
-             # Создаем новый растр, заполненный нулями.
-             # Для каждого пикселя:
-             #   Если raster_data[px] == 1:
-             #     decayed_raster[px] = decay_factor[px]
-             #   Иначе:
-             #     decayed_raster[px] = 0
-             #
-             # Можно сделать это эффективнее:
-             # `decayed_raster = raster_data * decay_factor` уже сделано выше,
-             # но это может дать дробные значения там, где было 0.
-             #
-             # Исправим:
+
+        if np.nanmin(raster_data) >= 0.0 and np.nanmax(raster_data) <= 1.0: # Быстрая O(N) проверка вместо долгой сортировки np.unique
              decayed_raster = np.zeros_like(raster_data, dtype=np.float32)
              # Находим индексы, где исходный растр был 1
              present_indices = (raster_data == 1)
              # Применяем рассчитанный фактор затухания только к этим пикселям
              decayed_raster[present_indices] = decay_factor[present_indices]
 
-        # Убедимся, что значения не выходят за разумные пределы (например, 0-1, если это вероятность)
-        # В зависимости от типа затухания, значения могут быть > 1 (если decay_rate очень мал)
-        # или < 0 (не должно произойти).
-        # Для 'inverse_quadratic' и 'exponential' значения будут от 0 до 1.
-        # Для 'gaussian' тоже от 0 до 1.
-        # Если растр исходный был с другими значениями, то здесь надо будет масштабировать.
-        # Для простоты, будем считать, что результат должен быть в диапазоне [0, 1]
-        # если исходный растр был бинарным.
         decayed_raster = np.clip(decayed_raster, 0, 1)
-        print(50)
 
         # Обновляем метаданные растра
         out_meta = src.meta.copy()
         out_meta.update({
             "driver": "GTiff",
             "dtype": rasterio.float32, # Для дробных значений
-            "nodata": 0.0 # Или другой подходящий NoData
+            "nodata": src.nodata # Сохраняем оригинальный маркер NoData (обычно np.nan)
         })
         
-        print(60)
         
         with rasterio.open(input_tiff_path, 'w', **out_meta) as dst:
             dst.write(decayed_raster, 1)
@@ -268,10 +180,10 @@ def predict_suitability_for_stack(model, stack, valid_mask, batch_size=500_000):
     return suitability_flat.reshape(H, W)
 
 
+# Обрезает строки ближайшим пробелом с заданной длинной.
 def wrap_long_lines(text, max_len=60):
     """
-    Wraps a string to a new line if its length exceeds max_len,
-    breaking at the nearest space to the left.
+    Обрезает строки ближайшим пробелом с заданной длинной.
 
     Args:
         text (str): The input string.
@@ -296,7 +208,24 @@ def wrap_long_lines(text, max_len=60):
     return text[:wrap_point].rstrip() + "\n" + wrap_long_lines(text[wrap_point:].lstrip(), max_len)
 
 
+# Считывает GeoTIFF файл и при необходимости репроецирует его в EPSG:3857 (Web Mercator).
 def read_and_to_3857(path):
+    """
+    Считывает GeoTIFF файл и при необходимости репроецирует его в EPSG:3857 (Web Mercator).
+    
+    Используется для подготовки растровых данных к корректному отображению поверх
+    веб-карт (например, OpenStreetMap) без геометрических искажений.
+    
+    Args:
+        path (str): Путь к исходному файлу GeoTIFF.
+        
+    Returns:
+        tuple: Кортеж (data, transform, width, height), где:
+            - data (np.ndarray): 2D массив значений растра (заполненный np.nan вместо NoData).
+            - transform (affine.Affine): Аффинная матрица трансформации.
+            - width (int): Ширина растра в пикселях.
+            - height (int): Высота растра в пикселях.
+    """
     dest_crs = CRS.from_epsg(3857)
     with rasterio.open(path) as src:
         src_crs = src.crs
@@ -327,6 +256,7 @@ def read_and_to_3857(path):
     return data, transform, width, height
 
 
+# Округляет число до заданного количества значащих цифр.
 def round_to_significant_figures(number: float, sig_digits: int = 4) -> float:
     """
     Округляет число до заданного количества значащих цифр.
@@ -345,6 +275,9 @@ def round_to_significant_figures(number: float, sig_digits: int = 4) -> float:
     
     if number == 0:
         return 0.0
+    
+    if math.isnan(number) or math.isinf(number):
+        return float(number)
     
     number = float(number)
     # Определяем порядок величины числа
@@ -390,11 +323,26 @@ def round_to_significant_figures(number: float, sig_digits: int = 4) -> float:
     return round(number / multiplier) * multiplier
 
 
+# Вычисляет показатель подобия двух гистограмм.
 def calculate_histogram_similarity(data_obs, data_full, bins_num=50, sig_figs=4):
     """
-    Вычисляет показатель подобия двух гистограмм.
-    Возвращает значение от 0 до 1 (1 - максимальное сходство).
+    Вычисляет показатель подобия двух распределений (гистограмм).
+    
+    Использует коэффициент корреляции Пирсона между нормализованными плотностями
+    вероятности двух наборов данных на одинаковой сетке интервалов.
+    
+    Args:
+        data_obs (np.ndarray): Массив значений в точках наблюдений.
+        data_full (np.ndarray): Массив значений на всем доступном фоне (ландшафте).
+        bins_num (int, optional): Количество интервалов разбиения (бинов). По умолчанию 50.
+        sig_figs (int, optional): Количество значащих цифр для округления результата. По умолчанию 4.
+        
+    Returns:
+        float: Значение от 0.0 до 1.0 (1.0 - максимальное сходство, 0.0 - сходства нет).
     """
+
+    if len(data_obs) == 0 or len(data_full) == 0:
+        return 0.0
     
     # 1. Рассчитываем гистограммы
     # Устанавливаем общий диапазон, чтобы бины были сопоставимы
@@ -465,16 +413,35 @@ def calculate_histogram_similarity(data_obs, data_full, bins_num=50, sig_figs=4)
         print(f"Ошибка при расчете корреляции Пирсона: {e}")
         correlation = 0.0
 
-    
-    return round_to_significant_figures(correlation, sig_figs)
+    # посоветовали использовать Schoener's D для оценки похожести гистограмм
+    schoeners_d = 1.0 - 0.5 * np.sum(np.abs(density_obs - density_full))
+    return round_to_significant_figures(schoeners_d, sig_figs)
+    #return round_to_significant_figures(correlation, sig_figs)
 
 
+# Вычисляет основные статистические показатели для набора данных.
 def get_predictor_stats(data: np.ndarray) -> dict:
     """
-    Вычисляет основные статистические показатели для набора данных.
+    Вычисляет основные статистические показатели для одномерного набора данных.
+    
+    Рассчитывает среднее, медиану, минимумы/максимумы, процентили (5, 95), 
+    стандартное отклонение, асимметрию и эксцесс. Автоматически игнорирует NaN.
+    
+    Args:
+        data (np.ndarray): Входной массив числовых данных.
+        
+    Returns:
+        dict: Словарь со статистическими показателями.
     """
     
     data = data[~np.isnan(data)]
+
+    if data.size == 0:
+        return {
+            'mean': np.nan, 'median': np.nan, 'min': np.nan, 'max': np.nan,
+            'p5': np.nan, 'p95': np.nan, 'width_obs': np.nan,
+            'std_dev': np.nan, 'skewness': np.nan, 'kurtosis': np.nan,
+        }
     
     stats = {
         'mean': round_to_significant_figures(np.mean(data), 4),
@@ -495,26 +462,43 @@ def get_predictor_stats(data: np.ndarray) -> dict:
         print('Ошибка вычисления статистики std_dev: ' + str(e))
     
     try:
-        stats['skewness'] = round_to_significant_figures(skew(data), 4)  # Стандартное отклонение
+        stats['skewness'] = round_to_significant_figures(skew(data), 4)  # Асимметрия (Skewness)
     except Exception as e:
         print('Ошибка вычисления статистики skewness: ' + str(e))
         
     try:
-        stats['kurtosis'] = round_to_significant_figures(kurtosis(data), 4)  # Стандартное отклонение
+        stats['kurtosis'] = round_to_significant_figures(kurtosis(data), 4)  # Эксцесс (Kurtosis)
     except Exception as e:
         print('Ошибка вычисления статистики kurtosis: ' + str(e))
     
     return stats
 
 
+# Форматирует число с плавающей точкой для отображения (убирает лишние нули).
 def format_float(value: float) -> str:
     """
-    Форматирует число с плавающей точкой для отображения (убирает лишние нули).
+    Форматирует число с плавающей точкой для компактного отображения.
+    
+    Округляет до 4 знаков после запятой и удаляет незначащие нули в конце.
+    
+    Args:
+        value (float): Исходное число.
+        
+    Returns:
+        str: Отформатированная строка.
     """
     return f"{value:.4f}".rstrip('0').rstrip('.')
 
 
+# Сохраняет текст ошибки в указанный текстовый файл.
 def save_error(error_path, text):
+    """
+    Сохраняет текст ошибки в указанный текстовый файл.
+    
+    Args:
+        error_path (str): Путь к файлу лога ошибки.
+        text (str|Exception): Текст ошибки или объект исключения.
+    """
     with open(error_path, 'w') as f: # записываем файл
         f.write(str(text))
 
@@ -616,17 +600,43 @@ def get_geotiff_square(filepath: str, threshold) -> dict:
         out_num.append(round(out_count[k]))
         
     return out_square, out_num
-    
 
 
+# Сохраняет 2D массив numpy в формате GeoTIFF.
 def save_geotiff(output_path, array2d, profile):
+    """
+    Сохраняет 2D массив numpy в формате GeoTIFF.
+    
+    Создает необходимые директории, если они не существуют, и применяет
+    переданный профиль метаданных (CRS, трансформацию, NoData).
+    
+    Args:
+        output_path (str): Целевой путь для сохранения файла.
+        array2d (np.ndarray): 2D массив данных растра.
+        profile (dict): Словарь с метаданными Rasterio.
+    """
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     prof = profile.copy()
     with rasterio.open(output_path, "w", **prof) as dst:
         dst.write(array2d.astype("float32"), 1)
-        
 
+
+# Выполняет обратное масштабирование значений предиктора в оригинальные единицы.
 def inverse_scale(scaled_data, scale_params, info):
+    """
+    Выполняет обратное масштабирование значений предиктора в оригинальные единицы.
+    
+    Используется для перевода стандартизированных данных (например, умноженных на 10 
+    или со смещением) обратно в понятные физические величины (градусы, миллиметры).
+    
+    Args:
+        scaled_data (np.ndarray): Массив масштабированных данных.
+        scale_params (dict): Параметры масштабирования, полученные из JSON конфигурации.
+        info (dict): Метаданные предиктора из справочника (содержит scale, diff).
+        
+    Returns:
+        np.ndarray: Массив значений в оригинальных физических единицах.
+    """
     if scale_params is None or "mean" not in scale_params or "scale" not in scale_params:
         return scaled_data
     method = scale_params.get("method", "standard")
