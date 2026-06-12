@@ -42,7 +42,7 @@ class PythonSDM:
         if not j:
             self.JOBS[self.IN_ID] = {'status': 'queued', 'file': None, 'error': None}
             
-        
+
         # если нулевые параметры - это запрос на данные из старого расчёта
         if self.IN_MIN_LAT==0 and self.IN_MAX_LAT==0:
             #print('Get old query: ' + str(self.IN_ID))
@@ -92,7 +92,13 @@ class PythonSDM:
         
         # Сколько фоновых точек генерировать: мин(10000, 10 * N_presence)
         self.MAX_BG = 10000
+
+        # какую неопределённость координат (в метрах из DWCA/GBIF) считаем допустимой
+        self.ALLOWED_COORD_UNCERTAIN = 1000
         
+        # начиная с какого года используем данные
+        self.MINIMUM_YEAR_ALLOWED = 1980
+
         # начали
         np.random.seed(self.RANDOM_SEED)
         
@@ -144,7 +150,8 @@ class PythonSDM:
             ret = load_species_occurrence_data(self.IN_ID, self.IN_CSV, self.IN_CSV_ADDITIONAL,
                                                self.CSV_FILENAME, self.CSV_FILENAME_ADD, self.CSV_FILTERED_FILENAME,
                                                self.MONTH_FILENAME, self.TEXT_FILENAME,
-                                               self.IN_MIN_LON, self.IN_MIN_LAT, self.IN_MAX_LON, self.IN_MAX_LAT)
+                                               self.IN_MIN_LON, self.IN_MIN_LAT, self.IN_MAX_LON, self.IN_MAX_LAT,
+                                               self.ALLOWED_COORD_UNCERTAIN, self.MINIMUM_YEAR_ALLOWED)
         except Exception as e:
             # если не будут возвращаться тексты ошибок исключений, раскомментировать две строчки ниже:
             print(e)

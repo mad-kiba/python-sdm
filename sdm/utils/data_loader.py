@@ -73,7 +73,8 @@ def detect_and_read_csv(filename):
 
 def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME, CSV_FILENAME_ADD,
                                 CSV_FILTERED_FILENAME, MONTH_FILENAME, TEXT_FILENAME,
-                                IN_MIN_LON, IN_MIN_LAT, IN_MAX_LON, IN_MAX_LAT):
+                                IN_MIN_LON, IN_MIN_LAT, IN_MAX_LON, IN_MAX_LAT, 
+                                ALLOWED_COORD_UNCERTAIN, MINIMUM_YEAR_ALLOWED):
     
     try:
         if (os.path.isfile(IN_CSV)): # если это путь к файлу, читаем файл, иначе считаем дампом csv
@@ -156,7 +157,7 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     print(f"-- 2.1. Фильтрация мусорных данных из GBIF ({IN_ID})")
     if 'coordinateUncertaintyInMeters' in df.columns:
         df['coordinateUncertaintyInMeters'] = df['coordinateUncertaintyInMeters'].fillna(0).astype(float).astype(int) 
-        df = df[df['coordinateUncertaintyInMeters']<1000]
+        df = df[df['coordinateUncertaintyInMeters']<ALLOWED_COORD_UNCERTAIN]
         
     if 'collectionCode' in df.columns:
         df = df[df['collectionCode']!='EOA']
@@ -174,19 +175,19 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     df[LON_COL] = df_filtered[LON_COL].astype(float)
     
     print(f"Осталось записей после фильтрации: {len(df)}")
+
+    # 2.3) фильтрация по координатам
+    df = df[df[LAT_COL]>IN_MIN_LAT]
+    df = df[df[LAT_COL]<IN_MAX_LAT]
+    df = df[df[LON_COL]>IN_MIN_LON]
+    df = df[df[LON_COL]<IN_MAX_LON]
     
-    # 2.2) группировка по месяцам для таблички встреч
+    # 2.3) группировка по месяцам для таблички встреч
     print(f"-- 2.2. Группировка по месяцам ({IN_ID})")
     # здесь где-то перепутаны координаты!!!
     MONTH_COL = ''
     if 'year' in df.columns:
-        df_coord_filtered = df[df['year']>1980]
-        #df_coord_filtered = df[df['year']>2010]
-        
-        df_coord_filtered = df_coord_filtered[df_coord_filtered[LAT_COL]>IN_MIN_LAT]
-        df_coord_filtered = df_coord_filtered[df_coord_filtered[LAT_COL]<IN_MAX_LAT]
-        df_coord_filtered = df_coord_filtered[df_coord_filtered[LON_COL]>IN_MIN_LON]
-        df_coord_filtered = df_coord_filtered[df_coord_filtered[LON_COL]<IN_MAX_LON]
+        df_coord_filtered = df[df['year']>MINIMUM_YEAR_ALLOWED]
         
         month_col = ''
         if 'month' in df_coord_filtered.columns:
@@ -205,7 +206,7 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     else:
         df_coord_filtered = df
     
-    # 2.3) финальные присустсвия
+    # 2.4) финальные присустсвия
     print(f"-- 2.3. Финальные присутствия ({IN_ID})")
     occ = load_occurrences(df_coord_filtered, LON_COL, LAT_COL, MONTH_COL)
     print("\n-- Обработка наблюдений")
