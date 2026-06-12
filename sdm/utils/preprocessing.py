@@ -1,3 +1,9 @@
+# to optimize
+
+# sdm/utils/preprocessing.py
+# Библиотека PythonSDM для моделирования распространения видов
+# - набор функций для предобработки слоёв биогеографической информации
+
 import os
 import rasterio
 import numpy as np
@@ -6,9 +12,11 @@ from rasterio.warp import calculate_default_transform, reproject, Resampling
 from rasterio.enums import Resampling as ResamplingEnum
 from rasterio.transform import array_bounds
 from rasterio.crs import CRS
+from rasterio.transform import xy
 
 
-# --- Функция для обработки одного GeoTIFF файла ---
+
+# Функция для обработки "сырого" GeoTIFF файла для модели.
 def process_single_geotiff(input_filepath: str, output_dir: str, target_crs: str, target_resolution_deg: float, bbox: tuple[float, float, float, float]):
     """
     Проверяет CRS и разрешение GeoTIFF, при необходимости репроектирует и изменяет разрешение,
@@ -39,8 +47,19 @@ def process_single_geotiff(input_filepath: str, output_dir: str, target_crs: str
             # Мы хотим, чтобы выходной растр ТОЧНО соответствовал bbox и разрешению.
             # Для этого calculate_default_transform должен работать от "целевого" представления.
             
-            # Преобразуем bbox в целевую CRS, если это еще не сделано
-            target_bounds_for_crop = rasterio.warp.transform_bounds(src_crs, target_crs, *bbox)
+            # BBOX уже задан пользователем в EPSG:4326 (target_crs). 
+            # Но если src_crs != 4326, координаты BBOX воспринимаются как метры в src_crs. 
+            # Правильно использовать bbox напрямую.
+            
+            # Выполняем "привязку к сетке" (Grid Snapping)
+            # Это защищает климатические слои от сильнейшего размытия при обрезке
+            res = target_resolution_deg
+            snapped_min_lon = np.floor(bbox[0] / res) * res
+            snapped_min_lat = np.floor(bbox[1] / res) * res
+            snapped_max_lon = np.ceil(bbox[2] / res) * res
+            snapped_max_lat = np.ceil(bbox[3] / res) * res
+            target_bounds_for_crop = (snapped_min_lon, snapped_min_lat, snapped_max_lon, snapped_max_lat)
+
 
             # Рассчитываем трансформацию, размеры и разрешение, которые будут ТОЧНО соответствовать bbox и target_resolution_deg
             final_transform, final_width, final_height = calculate_default_transform(
@@ -63,14 +82,24 @@ def process_single_geotiff(input_filepath: str, output_dir: str, target_crs: str
                     0.0, -target_resolution_deg, target_bounds_for_crop[3]
                 )
                 # Пересчитываем размеры, чтобы они соответствовали bbox и новому разрешению
-                final_width = int(np.ceil((target_bounds_for_crop[2] - target_bounds_for_crop[0]) / target_resolution_deg))
-                final_height = int(np.ceil((target_bounds_for_crop[3] - target_bounds_for_crop[1]) / target_resolution_deg))
+                final_width = int(np.round((target_bounds_for_crop[2] - target_bounds_for_crop[0]) / target_resolution_deg))
+                final_height = int(np.round((target_bounds_for_crop[3] - target_bounds_for_crop[1]) / target_resolution_deg))
 
 
             # Определение имени выходного файла
             base_name = os.path.splitext(os.path.basename(input_filepath))[0]
             output_filename = f"{base_name}.tif"
             final_output_filepath = os.path.join(output_dir, output_filename)
+
+            # А1. Умный выбор алгоритма интерполяции
+            # Если слой категориальный (типы покровов, классы Кёппена), используем Nearest, чтобы не создать "дробных" классов
+            is_categorical = np.issubdtype(src.dtypes[0], np.integer)
+            resampling_algo = ResamplingEnum.nearest if is_categorical else ResamplingEnum.bilinear
+            
+            # А2. Защита от заполнения пустот нулями (NoData Leakage)
+            # Если в исходном файле нет явного nodata, используем стандартный ГИС маркер -9999.0
+            safe_nodata = src.nodata if src.nodata is not None else -9999.0
+
 
             # 2. Создаем новый GeoTIFF файл и репроектируем/обрезаем данные
             with rasterio.open(
@@ -83,7 +112,7 @@ def process_single_geotiff(input_filepath: str, output_dir: str, target_crs: str
                 dtype=src.dtypes[0], # Используем тип данных из исходного файла
                 crs=target_crs,
                 transform=final_transform,
-                nodata=src.nodata, # Сохраняем nodata значение, если оно есть
+                nodata=safe_nodata, # Явно задаем безопасный nodata
                 compress='LZW',
                 tiled=True
             ) as final_dst:
@@ -95,8 +124,9 @@ def process_single_geotiff(input_filepath: str, output_dir: str, target_crs: str
                     src_crs=src_crs,
                     dst_transform=final_dst.transform,
                     dst_crs=final_dst.crs,
-                    resampling=ResamplingEnum.bilinear, # Используем билинейную для изменения разрешения
-                    bounds=target_bounds_for_crop # Указываем границы, по которым нужно обрезать
+                    src_nodata=src.nodata,     # Указываем, что игнорировать в источнике
+                    dst_nodata=safe_nodata,    # Чем заполнять пустые зоны при сдвиге
+                    resampling=resampling_algo # Умный выбор (Nearest / Bilinear)
                 )
                 
             
@@ -141,12 +171,13 @@ def process_single_geotiff(input_filepath: str, output_dir: str, target_crs: str
         return None
     except Exception as e:
         print(f"  Непредвиденная ошибка при обработке {os.path.basename(input_filepath)}: {e}")
-        # Попытка удалить временный файл, если он существует
-        if temp_output_filepath and os.path.exists(temp_output_filepath):
-            os.remove(temp_output_filepath)
+        # Обязательно удаляем "битый" недописанный файл, чтобы он не мешал будущим запускам
+        if final_output_filepath and os.path.exists(final_output_filepath):
+            os.remove(final_output_filepath)
         return None
 
 
+# Проходит по каждому "сырому" слою предикторов и готовит его к модели.
 def clip_rasters(RAW_RASTER_DIR, OUTPUT_RASTER_DIR, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MAX_LON,
                  MODEL_FUTURE, MODEL_PAST, MODEL_SEASON, IN_RESOLUTION):
     if IN_MIN_LAT==0:
@@ -158,10 +189,13 @@ def clip_rasters(RAW_RASTER_DIR, OUTPUT_RASTER_DIR, IN_MIN_LAT, IN_MIN_LON, IN_M
     
     if IN_RESOLUTION == '30s':
         TARGET_RESOLUTION_DEG = 30 / 3600.0
-    if IN_RESOLUTION == '1m':
+    elif  IN_RESOLUTION == '1m':
         TARGET_RESOLUTION_DEG = 2 * 30 / 3600.0
-    if IN_RESOLUTION == '5m':
+    elif IN_RESOLUTION == '5m':
         TARGET_RESOLUTION_DEG = 10 * 30 / 3600.0    
+    else:
+        print(f"Неподдерживаемое разрешение растра: {IN_RESOLUTION}")
+        raise ValueError(f"Неподдерживаемое разрешение растра: {IN_RESOLUTION}")
         
     TARGET_CRS = "EPSG:4326"
     BBOX = (IN_MIN_LON, IN_MIN_LAT, IN_MAX_LON, IN_MAX_LAT)
@@ -222,6 +256,7 @@ def clip_rasters(RAW_RASTER_DIR, OUTPUT_RASTER_DIR, IN_MIN_LAT, IN_MIN_LON, IN_M
     print(f"Результаты сохранены в папку: '{OUTPUT_RASTER_DIR}'")
 
 
+# Преобразует координаты (lon, lat) в индексы пикселей (row, col).
 def points_to_pixel_indices(lons, lats, transform, width, height):
     """Преобразует координаты (lon, lat) в индексы пикселей (row, col).
        Возвращает row, col и маску тех, кто внутри границ растра."""
@@ -234,6 +269,7 @@ def points_to_pixel_indices(lons, lats, transform, width, height):
     return rows, cols, inside
 
 
+# Преобразует индексы пикселей (row, col) обратно в координаты (lon, lat).
 def pixel_indices_to_points(rows, cols, transform, width, height):
     """
     Преобразует индексы пикселей (row, col) обратно в координаты (lon, lat).
@@ -254,25 +290,26 @@ def pixel_indices_to_points(rows, cols, transform, width, height):
                                    находятся в пределах границ растра.
     """
     # Создаем массивы для хранения результатов
-    lons = np.empty(len(rows))
-    lats = np.empty(len(rows))
-    inside = np.empty(len(rows), dtype=bool)
-    
-    # Итерируемся по каждому индексу пикселя
-    for i, (row, col) in enumerate(zip(rows, cols)):
-        # Проверяем, находится ли пиксель в пределах границ растра
-        if 0 <= row < height and 0 <= col < width:
-            # Используем метод `transform` для получения координат (x, y)
-            # x соответствует долготе, y - широте
-            lon, lat = transform * (col, row) # Обратите внимание на порядок: col для x, row для y
-            lons[i] = lon
-            lats[i] = lat
-            inside[i] = True
-        else:
-            # Если пиксель вне границ, присваиваем NaN или другое значение по умолчанию
-            lons[i] = np.nan
-            lats[i] = np.nan
-            inside[i] = False
+    lons = np.full(len(rows), np.nan, dtype=float)
+    lats = np.full(len(rows), np.nan, dtype=float)
+
+    # 1. Определяем, какие из входных индексов находятся в пределах растра.
+    inside = (rows >= 0) & (rows < height) & (cols >= 0) & (cols < width)
+
+    # 2. Выбираем только валидные индексы для преобразования.
+    # Это защищает от ошибок и ненужных вычислений.
+    valid_rows = rows[inside]
+    valid_cols = cols[inside]
+
+    # 3. Выполняем векторизованное преобразование.
+    # Функция `xy` из rasterio намного быстрее цикла.
+    # offset='center' автоматически вычисляет координаты центра пикселя.
+    if valid_rows.size > 0:
+        valid_lons, valid_lats = xy(transform, valid_rows, valid_cols, offset='center')
+        
+        # 4. Заполняем выходные массивы результатами.
+        lons[inside] = valid_lons
+        lats[inside] = valid_lats
     
     return lons, lats, inside
 

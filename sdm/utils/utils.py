@@ -1,3 +1,9 @@
+# to optimize
+
+# sdm/utils/plots.py
+# Библиотека PythonSDM для моделирования распространения видов
+# - набор вспомогательных функций
+
 import numpy as np
 import rasterio
 import math
@@ -232,8 +238,23 @@ def apply_decay_to_points(
         print(f"Результат затухания записан в: {input_tiff_path}")
     
 
-# Вспомогательная функция предсказания по стеку батчами
+# Предсказывает пригодность местообитаний (suitability) для всего стека предикторов по батчам.
 def predict_suitability_for_stack(model, stack, valid_mask, batch_size=500_000):
+    """
+    Предсказывает пригодность местообитаний (suitability) для всего стека предикторов по батчам.
+
+    Снижает потребление оперативной памяти при прогнозировании на больших растрах,
+    разбивая матрицу признаков на части.
+
+    Args:
+        model: Обученная модель классификации (обязан иметь метод `predict_proba`).
+        stack (np.ndarray): 3D массив предикторов формы (bands, H, W).
+        valid_mask (np.ndarray): 2D булева маска валидных пикселей формы (H, W).
+        batch_size (int, optional): Количество пикселей за один проход. По умолчанию 500_000.
+
+    Returns:
+        np.ndarray: 2D массив вероятностей (H, W), где невалидные пиксели - np.nan.
+    """
     bands, H, W = stack.shape
     flat = stack.reshape(bands, -1).T  # (H*W, bands)
     suitability_flat = np.full(H * W, np.nan, dtype="float32")
@@ -498,8 +519,21 @@ def save_error(error_path, text):
         f.write(str(text))
 
 
-# считает площадь подходящих местообитаний
+# Вычисляет физическую площадь (в кв. км) и количество пикселей, превышающих заданные пороги вероятности.
 def get_geotiff_square(filepath: str, threshold) -> dict:
+    """
+    Вычисляет физическую площадь (в кв. км) и количество пикселей, превышающих заданные пороги вероятности.
+
+    Использует эллипсоид WGS84 (pyproj.Geod) для точного расчета площади каждого пикселя
+    в зависимости от его широты (компенсация искажений проекции EPSG:4326).
+
+    Args:
+        filepath (str): Путь к растровому файлу GeoTIFF с вероятностями.
+        threshold (list of float): Список пороговых значений (от 0 до 1).
+
+    Returns:
+        tuple: (out_square, out_num) - списки с площадью (км²) и количеством пикселей для каждого порога.
+    """
     with rasterio.open(filepath) as src:
         # Получаем данные растра
         raster_data = src.read(1)
@@ -613,9 +647,19 @@ def inverse_scale(scaled_data, scale_params, info):
         return scaled_data
 
 
+# Извлекает значения предикторов из 3D-стека по координатам (индексам) пикселей.
 def extract_features_from_stack(stack, rows, cols):
-    """Извлекает значения предикторов из стека по индексам пикселей.
-       Возвращает X: (n_samples, n_bands)."""
+    """
+    Извлекает значения предикторов из 3D-стека по координатам (индексам) пикселей.
+
+    Args:
+        stack (np.ndarray): 3D массив предикторов формы (bands, H, W).
+        rows (np.ndarray): Массив целочисленных индексов строк.
+        cols (np.ndarray): Массив целочисленных индексов столбцов.
+
+    Returns:
+        np.ndarray: 2D матрица признаков формы (n_samples, n_bands).
+    """
     # stack: (bands, H, W)
     # fancy-indexing
     return stack[:, rows, cols].T  # (n_samples, n_bands)

@@ -1,40 +1,61 @@
+# to optimize
+
+# sdm/utils/plots.py
+# Библиотека PythonSDM для моделирования распространения видов
+# - набор функций для постройки графиков и карт
+
 import cv2
 import os
 import numpy as np
 import matplotlib.pyplot as plt
 import rasterio
-from rasterio.warp import reproject, Resampling, transform as rasterio_transform
-from rasterio.transform import array_bounds
 import contextily as ctx
+from rasterio.warp import reproject, Resampling
+from rasterio.transform import array_bounds
 from pyproj import CRS, Transformer
 from matplotlib.ticker import FuncFormatter, MaxNLocator
-from shapely.geometry import Point
 from PIL import Image
-import geopandas as gpd
-from shapely.geometry import Polygon
 import warnings
-import osmnx as ox
 
 from .utils import get_predictor_stats, format_float, calculate_histogram_similarity, get_geotiff_square
 from .utils import read_and_to_3857, round_to_significant_figures, wrap_long_lines
 
 
+# Строит и сохраняет график ROC-кривой (Receiver Operating Characteristic).
 def plot_roc_auc_curve(fpr, tpr, auc, auc_path, id): # постройка кривой ROC-AUC
-    plt.figure(figsize=(8, 6))
-    plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (AUC = {auc:.3f})')
-    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', label='Случайное угадывание') # Случайное угадывание
+    """
+    Строит и сохраняет график ROC-кривой (Receiver Operating Characteristic).
+
+    Args:
+        fpr (np.ndarray): Массив значений False Positive Rate (Доля ложноположительных).
+        tpr (np.ndarray): Массив значений True Positive Rate (Доля истинно положительных).
+        auc (float): Площадь под кривой (Area Under Curve).
+        auc_path (str): Путь для сохранения изображения графика.
+        id (int): Идентификатор задачи моделирования для заголовка.
+    """
+    plt.figure(figsize=(8, 6), facecolor='white')
+    ax = plt.gca()
+    
+    # Убираем верхнюю и правую рамки для современного вида
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    # Отрисовка кривых с современными цветами и заливкой площади
+    plt.plot(fpr, tpr, color='#FF5722', lw=2.5, label=f'ROC-кривая (AUC = {auc:.3f})')
+    plt.fill_between(fpr, tpr, alpha=0.15, color='#FF5722')
+    plt.plot([0, 1], [0, 1], color='#90A4AE', lw=2, linestyle='--', label='Случайное угадывание')
     plt.xlim([0.0, 1.0])
     plt.ylim([0.0, 1.05])
-    plt.xlabel('Ложные позитивные')
-    plt.ylabel('Истинные позитивные')
-    plt.title('ROC-кривая (id='+str(id)+')')
+    plt.xlabel('False Positive Rate (Ложноположительные)', fontsize=10, color='#37474F')
+    plt.ylabel('True Positive Rate (Истинно положительные)', fontsize=10, color='#37474F')
+    plt.title(f'Качество модели: ROC-кривая (id={id})', fontsize=12, pad=15, color='#263238')
     plt.legend(loc="lower right")
-    plt.grid(True)
-    #plt.show()
+    plt.grid(True, linestyle='--', alpha=0.3)
     
     plt.savefig(auc_path, dpi=200) # quality=90 - не найден такой параметр
 
 
+# Создает видеофайл AVI из массива путей к четырем изображениям.
 def create_avi_from_images(image_paths, output_mp4_path='output.mp4', fps=1): # создание видео AVI из картинок
     """
     Создает видеофайл AVI из массива путей к четырем изображениям.
@@ -85,8 +106,9 @@ def create_avi_from_images(image_paths, output_mp4_path='output.mp4', fps=1): # 
     video.release() 
 
     print(f"Видеофайл успешно создан: {output_mp4_path}")
-    
 
+
+# Создает анимированный GIF из списка путей к изображениям.
 def create_animated_gif(image_paths, output_path="animation.gif", duration=500):
     """
     Создает анимированный GIF из списка путей к изображениям.
@@ -134,6 +156,7 @@ def create_animated_gif(image_paths, output_path="animation.gif", duration=500):
     print(f"Анимированный GIF сохранен как: {output_path}")
 
 
+# Строит график значений GeoTIFF, накладывая поверх него контекстную карту OSM.
 def plot_geotiff_with_osm(geotiff_path: str, output_path: str, mean: float, scale: float, band: str, bio_info):
     """
     Строит график значений GeoTIFF, накладывая поверх него контекстную карту OSM.
@@ -152,7 +175,7 @@ def plot_geotiff_with_osm(geotiff_path: str, output_path: str, mean: float, scal
 
     print(f"Загрузка GeoTIFF: {geotiff_path}")
     
-    band_info = bio_info.get(band)
+    band_info = bio_info.get(band) or {}
     
     with rasterio.open(geotiff_path) as src:
         # 1. Чтение и репроекция GeoTIFF данных в EPSG:3857 (Web Mercator)
@@ -258,8 +281,16 @@ def plot_geotiff_with_osm(geotiff_path: str, output_path: str, mean: float, scal
             min_val_scaled = (min_val * predictor_scale - mean + delta) / scale
             reprojected_data[reprojected_data<min_val_scaled] = np.nan
         
+        if max_val is not None:
+            max_val_scaled = (max_val * predictor_scale - mean + delta) / scale
+            reprojected_data[reprojected_data>max_val_scaled] = np.nan
+        
+        # Настраиваем цветовую схему, чтобы NaN (пустые пиксели) были полностью прозрачными
+        cmap_pred = plt.cm.coolwarm.copy()
+        cmap_pred.set_bad(alpha=0.0)
+        
         # Отображение GeoTIFF данных
-        im = ax.imshow(reprojected_data, cmap='coolwarm', extent=extent_m, origin='upper', aspect='auto', alpha=0.7, zorder=1)
+        im = ax.imshow(reprojected_data, cmap=cmap_pred, extent=extent_m, origin='upper', aspect='auto', alpha=0.7, zorder=1)
         
         # 5. Настройка шкалы значений
         cbar = plt.colorbar(im, ax=ax, orientation='vertical', shrink=0.7)
@@ -324,11 +355,10 @@ def plot_geotiff_with_osm(geotiff_path: str, output_path: str, mean: float, scal
         # Заголовки осей
         ax.set_xlabel('Долгота (°)')
         ax.set_ylabel('Широта (°)')
-        pred_title = band
-        if bio_info:
-            pred_title = bio_info.get(band)['title']
-            if bio_info.get(band)['unit']!='':
-                pred_title = pred_title + ', ' + bio_info.get(band)['unit']
+        pred_title = band_info.get('title', band)
+        unit = band_info.get('unit', '')
+        if unit:
+            pred_title = f"{pred_title}, {unit}"
         ax.set_title(pred_title, fontsize=8)
         ax.grid(True, linestyle='--', alpha=0.6)
 
@@ -338,12 +368,32 @@ def plot_geotiff_with_osm(geotiff_path: str, output_path: str, mean: float, scal
         print(f"График успешно сохранен в {output_path}")
 
 
-def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title = '', rows=[], cols=[], map_only=0, id=0):
+# Отрисовывает карту вероятности присутствия вида, накладывая GeoTIFF поверх OpenStreetMap.
+def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title='', lons=[], lats=[], map_only=0, id=0):
+    """
+    Отрисовывает карту вероятности присутствия вида, накладывая GeoTIFF поверх OpenStreetMap.
+
+    Динамически подбирает размеры фигуры на основе соотношения сторон (Bounding Box).
+    Отображает точки наблюдений поверх тепловой карты вероятностей.
+
+    Args:
+        OUTPUT_SUITABILITY_TIF (str): Путь к исходному GeoTIFF с вероятностями.
+        OUTPUT_SUITABILITY_JPG (str): Путь для сохранения готового JPG изображения карты.
+        title (str, optional): Заголовок карты. По умолчанию ''.
+        lons (list/np.ndarray, optional): Долгота (X-координаты) точек наблюдений (в EPSG:4326). По умолчанию [].
+        lats (list/np.ndarray, optional): Широта (Y-координаты) точек наблюдений (в EPSG:4326). По умолчанию [].
+        map_only (int, optional): Флаг (1/0) для отрисовки только точек без тепловой карты. По умолчанию 0.
+        id (int, optional): Идентификатор модели (используется для генерации ссылок в подвале). По умолчанию 0.
+    """
+
     data, transform, width, height = read_and_to_3857(OUTPUT_SUITABILITY_TIF)
     
     # если наблюдений меньше пяти и моделирования не было, рисуем только точки
     if map_only==1:
-        data = data * 0
+        # Чтобы скрыть тепловую карту и показать только точки поверх OSM,
+        # слой должен состоять из NaN (которые делаются прозрачными через alpha=0.0).
+        # Умножение на 0 создавало бы непрозрачный черный прямоугольник (цвет 0.0 в colormap).
+        data = data * np.nan
         
     #print('---')
     #print(data)
@@ -423,19 +473,21 @@ def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title = '', rows=[]
     cbar = fig.colorbar(im, ax=ax, fraction=0.035, pad=0.03)
     cbar.set_label("Вероятность присутствия")
     
-    #print(rows)
-    #print(cols)
+    #print(lons)
+    #print(lats)
     
     #print(xmin, xmax)
     #print(ymin, ymax)
     
     transformer = Transformer.from_crs(CRS("EPSG:4326"), CRS("EPSG:3857"), always_xy=True)
-    x_3857, y_3857 = transformer.transform(rows, cols)
+    x_3857, y_3857 = transformer.transform(lons, lats)
     
     # наносим точки встреч на карту
-    if len(rows)>0:
-        ax.scatter(x_3857, y_3857, marker='o', s=5, color='red', alpha=0.7, zorder=100)
-        ax.scatter(x_3857, y_3857, marker='o', s=4, color='yellow', alpha=0.7, zorder=100)
+    if len(lons)>0:
+        # Рисуем ореол (glow) для лучшей видимости
+        ax.scatter(x_3857, y_3857, marker='o', s=25, color='#FF3D00', alpha=0.4, zorder=99, edgecolor='none')
+        # Рисуем яркую сердцевину с белой окантовкой
+        ax.scatter(x_3857, y_3857, marker='o', s=8, color='#FFC107', zorder=100, edgecolor='white', linewidth=0.5)
         #print(f"Added {len(x_3857)} observation points to the map in EPSG:3857 using manual coordinate calculation.")
     
     # Оси в градусах (слева и снизу)
@@ -503,24 +555,42 @@ def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title = '', rows=[]
     )
     
     plt.close(fig)
-    
-    
+
+
+# Рисует гистограмму на заданных осях.
 def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, bins_num: int, data_full: np.ndarray, bio_info, title = ''):
     """
-    Рисует красивую и информативную гистограмму на заданных осях.
+    Строит сравнительную гистограмму распределения значений предиктора.
+
+    Сравнивает распределение климатического фактора в точках присутствия вида (data)
+    с общим распределением этого фактора на всем доступном фоне/ландшафте (data_full).
+    Вычисляет и наносит на график статистические метрики (среднее, медиану, процентили).
+
+    Args:
+        ax (plt.Axes): Объект осей Matplotlib для отрисовки графика.
+        data (np.ndarray): Массив значений предиктора в точках наблюдений вида.
+        band_name (str): Название слоя предиктора (используется как ключ для справочника).
+        bins_num (int): Количество интервалов (корзин) для построения гистограммы.
+        data_full (np.ndarray): Массив значений предиктора на всем фоне (valid_mask).
+        bio_info (dict): Справочник метаданных предикторов (единицы измерения, лимиты).
+        title (str, optional): Дополнительный текст для заголовка графика. По умолчанию ''.
+
+    Returns:
+        tuple: (stats_data, stats_predictor) - два словаря со статистическими показателями для наблюдений и фона.
     """
     
     data = data[~np.isnan(data)]
     data_full = data_full[~np.isnan(data_full)]
     
-    min_val = bio_info.get(band_name).get('min_val')
-    max_val = bio_info.get(band_name).get('max_val')
+    band_info = bio_info.get(band_name) or {}
+    min_val = band_info.get('min_val')
+    max_val = band_info.get('max_val')
     
     if min_val is not None:
-        data = data[data>min_val]
+        data = data[data>=min_val]
         data_full = data_full[data_full>min_val]
     if max_val is not None:
-        data = data[data<max_val]
+        data = data[data<=max_val]
         data_full = data_full[data_full<max_val]
     
     stats_data = {}
@@ -535,10 +605,10 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
         print(e)
     
     #print(stats_data)
-    stats_data['unit'] = bio_info.get(band_name).get('unit')
-    stats_data['scale'] = bio_info.get(band_name).get('scale')
-    stats_data['min_val'] = bio_info.get(band_name).get('min_val')
-    stats_data['max_val'] = bio_info.get(band_name).get('max_val')
+    stats_data['unit'] = band_info.get('unit')
+    stats_data['scale'] = band_info.get('scale')
+    stats_data['min_val'] = band_info.get('min_val')
+    stats_data['max_val'] = band_info.get('max_val')
     stats_data['test'] = 'tests'
     
     
@@ -546,17 +616,13 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
         # Определяем диапазон бинов.
         # Сначала убедимся, что data_full имеет хотя бы данные для расчета диапазона,
         # если data пустая.
-        if data.size > 0:
-            # Если data есть, используем ее диапазон для всех гистограмм
-            #counts_data, bin_edges_data = np.histogram(data, bins=bins_num)
-            #bins_range = (bin_edges_data.min(), bin_edges_data.max())
-            counts_full_temp, bin_edges_full_temp = np.histogram(data_full, bins=bins_num)
-            counts_data, bin_edges_data = np.histogram(data_full, bins=bins_num)
-            bins_range = (bin_edges_full_temp.min(), bin_edges_full_temp.max())
-        elif data_full.size > 0:
-            # Если data пустая, но data_full есть, используем диапазон data_full
-            counts_full_temp, bin_edges_full_temp = np.histogram(data_full, bins=bins_num)
-            bins_range = (bin_edges_full_temp.min(), bin_edges_full_temp.max())
+        if data.size > 0 or data_full.size > 0:
+            # Диапазон определяем мгновенно (без построения гистограмм)
+            bins_range = (np.min(data_full), np.max(data_full))
+            # Защита от ValueError, если весь растр состоит из одного значения (min == max)
+            if bins_range[0] == bins_range[1]:
+                val = bins_range[0]
+                bins_range = (val - 0.5, val + 0.5)
         else:
             # Если оба массива пусты, не можем построить гистограмму.
             # Можно вывести сообщение или просто выйти.
@@ -564,7 +630,7 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
             return
         # --- Расчет counts и нормализация для data ---
         if data.size > 0:
-            counts_data, _ = np.histogram(data, bins=bins_num, range=bins_range) # Используем общий bins_range
+            counts_data, bin_edges_data = np.histogram(data, bins=bins_num, range=bins_range) # Используем общий bins_range
             max_count_data = counts_data.max() if counts_data.size > 0 else 0
             normalized_counts_data = counts_data / max_count_data if max_count_data > 0 else np.zeros_like(counts_data)
         else:
@@ -598,7 +664,7 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
     try:
         # Используем bin_edges_full[:-1] как x-координаты (левые границы бинов)
         ax.bar(bin_edges_full[:-1], normalized_counts_full, width=bin_width_full, align='edge',
-               color='grey', edgecolor='black', alpha=0.3, label='Распределение всего слоя')
+               color='#CFD8DC', edgecolor='none', alpha=0.6, label='Фон (весь слой)')
         
         # --- Рисуем гистограмму для данных наблюдений (data) с помощью ax.bar ---
         if len(bin_edges_data) > 1:
@@ -608,19 +674,20 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
         
         
         ax.bar(bin_edges_data[:-1], normalized_counts_data, width=bin_width_data, align='edge',
-               color='skyblue', edgecolor='black', alpha=0.7, label='Частота наблюдений')
+               color='#03A9F4', edgecolor='white', linewidth=0.5, alpha=0.85, label='Присутствия')
         
         # --- Добавляем линии для основных статистик (для data) ---
         # Линии рисуем по исходным данным (data), а не по нормализованным counts.
-        ax.axvline(stats_data['mean'], color='red', linestyle='dashed', linewidth=1.5, label=f'Среднее ({format_float(stats_data["mean"])})')
-        ax.axvline(stats_data['median'], color='green', linestyle='dashed', linewidth=1.5, label=f'Медиана ({format_float(stats_data["median"])})')
-        ax.axvline(stats_data['p5'], color='orange', linestyle='dotted', linewidth=1)
-        ax.axvline(stats_data['p95'], color='orange', linestyle='dotted', linewidth=1, label='5%/95%')
+        ax.axvline(stats_data['mean'], color='#FF5252', linestyle='--', linewidth=1.5, label=f'Среднее ({format_float(stats_data["mean"])})')
+        ax.axvline(stats_data['median'], color='#4CAF50', linestyle='-', linewidth=1.5, label=f'Медиана ({format_float(stats_data["median"])})')
+        ax.axvline(stats_data['p5'], color='#FFB300', linestyle=':', linewidth=1.2)
+        ax.axvline(stats_data['p95'], color='#FFB300', linestyle=':', linewidth=1.2, label='5%/95%')
         
         # --- Заголовок и подписи осей ---
-        pred_title = bio_info.get(band_name).get('title')
-        if bio_info.get(band_name)['unit']!='':
-            pred_title = pred_title + ', ' + bio_info.get(band_name).get('unit')
+        pred_title = band_info.get('title', band_name)
+        unit = band_info.get('unit', '')
+        if unit:
+            pred_title = f"{pred_title}, {unit}"
         axtitle = "Гистограмма отклика для предиктора:\n"+wrap_long_lines(pred_title, 100)
         if (title != ''):
             axtitle = axtitle + "\n" + title
@@ -632,9 +699,14 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
         ax.set_xlabel(xlabel_text, fontsize=7)
         
         # --- Улучшаем внешний вид осей ---
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['left'].set_color('#B0BEC5')
+        ax.spines['bottom'].set_color('#B0BEC5')
+        
         ax.tick_params(axis='both', which='major', labelsize=9)
         ax.grid(axis='y', alpha=0.5)
-        ax.grid(axis='x', linestyle='--', alpha=0.2)
+        ax.grid(axis='x', linestyle='--', alpha=0.1)
     
         # --- Добавляем информацию о статистике (для data) ---
         y_pos_for_stats_data_adjusted = 0.95
@@ -657,6 +729,7 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
     return stats_data, stats_predictor
 
 
+# Добавляет статистическую информацию на оси гистограммы.
 def add_stats_to_plot(ax: plt.Axes, stats: dict, stats_pred: dict, y_pos: float, y_max_overall: float = None):
     """
     Добавляет статистическую информацию на оси гистограммы.
@@ -745,4 +818,4 @@ def add_stats_to_plot(ax: plt.Axes, stats: dict, stats_pred: dict, y_pos: float,
     # В данной функции `add_stats_to_plot`, `y_pos` напрямую используется для Y-координаты.
 
     ax.text(1.02, y_pos, stats_text, transform=ax.transAxes, fontsize=9,
-            verticalalignment='top', bbox=dict(boxstyle='round,pad=0.5', fc='wheat', alpha=0.5))
+            verticalalignment='top', bbox=dict(boxstyle='round,pad=0.8', fc='#FAFAFA', ec='#E0E0E0', alpha=0.9))
