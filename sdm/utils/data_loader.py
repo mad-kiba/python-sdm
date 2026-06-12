@@ -4,8 +4,23 @@ import numpy as np
 import json
 import glob
 import rasterio
+import re
+import shutil
+from scipy.ndimage import distance_transform_edt
 
 from .plots import plot_geotiff_with_osm
+
+
+# Вспомогательная функция для приведения имен координат к единому стандарту
+def standardize_coord_names(d):
+    if 'Latitude' in d.columns:
+        d = d.rename(columns={'Latitude': 'lat', 'Longitude': 'lon'})
+    elif 'latitude' in d.columns:
+        d = d.rename(columns={'latitude': 'lat', 'longitude': 'lon'})
+    elif 'decimalLatitude' in d.columns:
+        d = d.rename(columns={'decimalLatitude': 'lat', 'decimalLongitude': 'lon'})
+    return d
+
 
 def load_occurrences(df, lon_col, lat_col, month_col=''): 
     """Загружает CSV с наблюдениями, фильтрует некорректные координаты."""
@@ -61,13 +76,7 @@ def detect_and_read_csv(filename):
 
     print(f"Определен разделитель: '{detected_separator}'") # Опционально: для отладки
 
-    df = pd.read_csv(
-        filename,
-        sep=detected_separator,
-        index_col=False,
-        on_bad_lines='skip',
-        low_memory=False
-    )
+    df = pd.read_csv(filename, sep=detected_separator, index_col=False, on_bad_lines='skip', low_memory=False)
     return df
 
 
@@ -77,23 +86,22 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
                                 ALLOWED_COORD_UNCERTAIN, MINIMUM_YEAR_ALLOWED):
     
     try:
-        if (os.path.isfile(IN_CSV)): # если это путь к файлу, читаем файл, иначе считаем дампом csv
-            with open(IN_CSV, 'r') as file: # читаем исходный файл
-                IN_CSV = file.read()
+        # Защита от OSError (File name too long) при передаче длинных сырых строк
+        is_file_path = len(IN_CSV) < 2048 and os.path.isfile(IN_CSV)
+        if is_file_path:
+            shutil.copyfile(IN_CSV, CSV_FILENAME)
         else:
-            print('На вход пришёл набор csv')
-        if IN_CSV == '':
-            print('file is empty')
-            raise ValueError('Входной файл пустой.')
+            if not IN_CSV:
+                print('file is empty')
+                raise ValueError('Входной файл пустой.')
+            with open(CSV_FILENAME, 'w', encoding='utf-8') as f: # записываем дамп
+                f.write(IN_CSV)
     except Exception as e:
-        print('file read error')
-        raise ValueError('Ошибка чтения файла: ' + str(e))
-    
-    with open(CSV_FILENAME, 'w') as f: # записываем файл
-        f.write(IN_CSV)
+        print('file read/copy error')
+        raise ValueError('Ошибка обработки входного файла: ' + str(e))
         
-    #df = pd.read_csv(CSV_FILENAME, sep="\t", index_col=False, on_bad_lines='skip', low_memory=False)
     df = detect_and_read_csv(CSV_FILENAME)
+    df = standardize_coord_names(df)
     
     # вычисляем информацию о виде
     species = ''
@@ -113,12 +121,13 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     
     print(f"Всего загружено записей: {len(df)}")
     
-    if IN_CSV_ADDITIONAL != '': # если есть дополнительные записи - добавим их
-        with open(CSV_FILENAME_ADD, 'w') as f: # записываем файл
+    if IN_CSV_ADDITIONAL: # Безопасная проверка на пустую строку и на None
+        with open(CSV_FILENAME_ADD, 'w', encoding='utf-8') as f: # Явно указываем UTF-8 для избежания краша на кириллице
             f.write(IN_CSV_ADDITIONAL)
             f.close()
             
-        df2 = pd.read_csv(CSV_FILENAME_ADD, sep="\t", index_col=False, on_bad_lines='skip', low_memory=False, )
+        df2 = detect_and_read_csv(CSV_FILENAME_ADD)
+        df2 = standardize_coord_names(df2)
         
         columns_df = df.columns
         columns_df2 = df2.columns
@@ -137,18 +146,6 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     LAT_COL = 'lat'
     LON_COL = 'lon'
     
-    if 'Latitude' in df.columns:
-        LAT_COL = 'Latitude'
-        LON_COL = 'Longitude'
-        
-    if 'latitude' in df.columns:
-        LAT_COL = 'latitude'
-        LON_COL = 'longitude'
-    
-    if 'decimalLatitude' in df.columns:
-        LAT_COL = 'decimalLatitude'
-        LON_COL = 'decimalLongitude'
-    
     if not LAT_COL in df.columns:
         print('csv parse error')
         raise ValueError('Ошибка обработки csv. Проверьте, что у входных данных корректный формат. Колонки с координатами должны называться lat, lon. Ячейки должны разделяться символом табуляции (при экспорте из Excel используйте формат текстовый файл с табуляцией).')
@@ -164,30 +161,26 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     #print(df[LAT_COL])
     #print(df[LON_COL])
     
-    df['lat_str'] = df[LAT_COL].astype(str)
-    numeric_values = pd.to_numeric(df['lat_str'], errors='coerce')
-    df_filtered = df[numeric_values.notna()].copy()
-    df[LAT_COL] = df_filtered[LAT_COL].astype(float)
-    
-    df['lon_str'] = df[LON_COL].astype(str)
-    numeric_values = pd.to_numeric(df['lon_str'], errors='coerce')
-    df_filtered = df[numeric_values.notna()].copy()
-    df[LON_COL] = df_filtered[LON_COL].astype(float)
+    # Эффективная и безопасная очистка координат (без дублирования DataFrame)
+    df[LAT_COL] = pd.to_numeric(df[LAT_COL], errors='coerce')
+    df[LON_COL] = pd.to_numeric(df[LON_COL], errors='coerce')
+    df = df.dropna(subset=[LAT_COL, LON_COL])
     
     print(f"Осталось записей после фильтрации: {len(df)}")
 
     # 2.3) фильтрация по координатам
-    df = df[df[LAT_COL]>IN_MIN_LAT]
-    df = df[df[LAT_COL]<IN_MAX_LAT]
-    df = df[df[LON_COL]>IN_MIN_LON]
-    df = df[df[LON_COL]<IN_MAX_LON]
+    df = df[df[LAT_COL]>=IN_MIN_LAT]
+    df = df[df[LAT_COL]<=IN_MAX_LAT]
+    df = df[df[LON_COL]>=IN_MIN_LON]
+    df = df[df[LON_COL]<=IN_MAX_LON]
     
     # 2.3) группировка по месяцам для таблички встреч
     print(f"-- 2.2. Группировка по месяцам ({IN_ID})")
-    # здесь где-то перепутаны координаты!!!
+    
     MONTH_COL = ''
     if 'year' in df.columns:
-        df_coord_filtered = df[df['year']>MINIMUM_YEAR_ALLOWED]
+        year_numeric = pd.to_numeric(df['year'], errors='coerce')
+        df_coord_filtered = df[year_numeric > MINIMUM_YEAR_ALLOWED].copy()
         
         month_col = ''
         if 'month' in df_coord_filtered.columns:
@@ -225,7 +218,8 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     return {'LAT_COL': LAT_COL, 'LON_COL': LON_COL, 'df': df, 'occ': occ, 'status': 'done', 'species': species, 'kingdom': kingdom, 'dclass': dclass}
 
 
-def load_environmental_predictors(raster_dir, predictors = 'all', period='current', interval='', scales='', bio_info=''):
+def load_environmental_predictors(raster_dir, predictors = 'all', period='current', interval='', scales='', 
+                                  bio_info='', base_period='1981-2010'):
     """Считывает все GeoTIFF из папки и строит стек (bands, H, W).
        Возвращает: stack(float32), valid_mask(bool), transform, crs, profile, band_names(list)"""
     
@@ -285,11 +279,10 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
                 if period == 'future':
                     # хак для разных имён файлов предикторов CHELSA
                     subrep = os.path.basename(available_file_path)
-                    subrep = subrep.replace('_mpi-esm1-2-hr_', '')
-                    subrep = subrep.replace('ssp126', '')
-                    subrep = subrep.replace('ssp370', '')
-                    subrep = subrep.replace('ssp585', '')
-                    subrep = subrep.replace(interval.split('/')[0], '1981-2010')
+                    # Универсальное удаление любой GCM модели и сценария SSP (например, _mpi-esm1-2-hr_ssp126)
+                    # Это делает загрузчик совместимым с UKESM1, GFDL-ESM4, IPSL и др.
+                    subrep = re.sub(r'_[a-zA-Z0-9\-]+_ssp[0-9]{3}', '', subrep)
+                    subrep = subrep.replace(interval.split('/')[0], base_period)
                     #print('interval: '+interval.split('/')[0])
                     #print('in:  '+os.path.basename(available_file_path))
                     #print('rep: '+subrep)
@@ -354,8 +347,8 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
     
     for i, fp in enumerate(tifs):
         with rasterio.open(fp) as ds:
-            arr = ds.read(1, masked=True).astype("float32")  # masked -> маскирует nodata
-            #arr = np.ma.filled(arr, np.nan)                  # превращаем masked в np.nan
+            arr = ds.read(1, masked=True)
+            arr = np.ma.filled(arr, np.nan).astype("float32") # Обязательно превращаем NoData в NaN
             if i == 0:
                 ref_transform = ds.transform
                 ref_width, ref_height = ds.width, ds.height
@@ -370,11 +363,24 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
             band_names.append(os.path.splitext(os.path.basename(fp))[0])
     
     stack = np.stack(band_arrays, axis=0)  # shape: (bands, H, W)
+
+    # Экстраполяция предикторов на водные пространства (Nearest Neighbor)
+    print("Экстраполяция значений предикторов на акватории (Nearest Neighbor)...")
+    MAX_EXTRAPOLATE_PIXELS = 50 # Лимит экстраполяции от берега (50 точек растра, т.е. примерно 50 км при step=30")
+
+    for i in range(stack.shape[0]):
+        nan_mask = np.isnan(stack[i])
+        if nan_mask.any() and not nan_mask.all():
+            # Для каждого NaN-пикселя находим координаты ближайшего валидного пикселя (суши)
+            distances, indices = distance_transform_edt(nan_mask, return_distances=True, return_indices=True)
+            # Применяем экстраполяцию только к тем пикселям моря, которые близко к берегу
+            close_enough = nan_mask & (distances <= MAX_EXTRAPOLATE_PIXELS)
+            stack[i][close_enough] = stack[i][tuple(indices)][close_enough]
+
     # Маска валидных пикселей: валиден, если нет NaN во всех слоях
-    #valid_mask = np.all(~np.isnan(stack), axis=0)
-    # NB: слои SoilGrids портят картинку своими масками, особенно это касается берегов рек.
-    # Решил на данный момент отключить маску валидности.
-    valid_mask = np.ones(stack.shape[1:], dtype=bool)
+    valid_mask = ~np.isnan(stack[0])
+    # Теперь валидна не вся карта BBox, а только суша + 50км прибрежной зоны
+
     # Профиль для сохранения результата
     
     #print('Форма растров: ')
