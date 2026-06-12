@@ -176,13 +176,13 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     # здесь где-то перепутаны координаты!!!
     MONTH_COL = ''
     if 'year' in df.columns:
-        #df_coord_filtered = df[df['year']>1980]
-        df_coord_filtered = df[df['year']>2010]
+        df_coord_filtered = df[df['year']>1980]
+        #df_coord_filtered = df[df['year']>2010]
         
-        df_coord_filtered = df_coord_filtered[df_coord_filtered[LAT_COL]>IN_MIN_LON]
-        df_coord_filtered = df_coord_filtered[df_coord_filtered[LAT_COL]<IN_MAX_LON]
-        df_coord_filtered = df_coord_filtered[df_coord_filtered[LON_COL]>IN_MIN_LAT]
-        df_coord_filtered = df_coord_filtered[df_coord_filtered[LON_COL]<IN_MAX_LAT]
+        df_coord_filtered = df_coord_filtered[df_coord_filtered[LAT_COL]>IN_MIN_LAT]
+        df_coord_filtered = df_coord_filtered[df_coord_filtered[LAT_COL]<IN_MAX_LAT]
+        df_coord_filtered = df_coord_filtered[df_coord_filtered[LON_COL]>IN_MIN_LON]
+        df_coord_filtered = df_coord_filtered[df_coord_filtered[LON_COL]<IN_MAX_LON]
         
         month_col = ''
         if 'month' in df_coord_filtered.columns:

@@ -164,7 +164,7 @@ def clip_rasters(RAW_RASTER_DIR, OUTPUT_RASTER_DIR, IN_MIN_LAT, IN_MIN_LON, IN_M
         TARGET_RESOLUTION_DEG = 10 * 30 / 3600.0    
         
     TARGET_CRS = "EPSG:4326"
-    BBOX = (IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MAX_LON)
+    BBOX = (IN_MIN_LON, IN_MIN_LAT, IN_MAX_LON, IN_MAX_LAT)
     
     os.makedirs(OUTPUT_RASTER_DIR, exist_ok=True)
     

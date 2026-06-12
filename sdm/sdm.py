@@ -42,7 +42,7 @@ class PythonSDM:
         if not j:
             self.JOBS[self.IN_ID] = {'status': 'queued', 'file': None, 'error': None}
             
-            
+        
         # если нулевые параметры - это запрос на данные из старого расчёта
         if self.IN_MIN_LAT==0 and self.IN_MAX_LAT==0:
             #print('Get old query: ' + str(self.IN_ID))
@@ -58,7 +58,7 @@ class PythonSDM:
                 return {'result': 'Ok', 'code': 200}
         else:
             print(f"-- Регион для моделирования ({self.IN_ID}): ")
-            print("("+str(self.IN_MIN_LAT)+","+str(self.IN_MIN_LON)+"), ("+str(self.IN_MAX_LAT)+","+str(self.IN_MAX_LON)+"), step: "+self.IN_RESOLUTION)
+            print("("+str(self.IN_MIN_LON)+","+str(self.IN_MIN_LAT)+"), ("+str(self.IN_MAX_LON)+","+str(self.IN_MAX_LAT)+"), step: "+self.IN_RESOLUTION)
         
         
         
@@ -82,8 +82,8 @@ class PythonSDM:
         
         self.SCALES_FILE = os.path.join(self.RAW_RASTER_DIR, 'predictors_scales.json')
         
-        self.OUTPUT_RASTER_DIR = "output_predictors/"+self.IN_RESOLUTION+"/("+str(self.IN_MIN_LAT)+","\
-                                +str(self.IN_MIN_LON)+"), ("+str(self.IN_MAX_LAT)+","+str(self.IN_MAX_LON)+")"
+        self.OUTPUT_RASTER_DIR = "output_predictors/"+self.IN_RESOLUTION+"/("+str(self.IN_MIN_LON)+","\
+                                +str(self.IN_MIN_LAT)+"), ("+str(self.IN_MAX_LON)+","+str(self.IN_MAX_LAT)+")"
         self.RASTER_DIR = self.OUTPUT_RASTER_DIR # папка с GeoTIFF-предикторами
         
         if self.SCENARIOS == 'all':
@@ -372,7 +372,7 @@ class PythonSDM:
             if month==0:
                 with open(self.TEXT_FILENAME, 'a') as f:
                     f.write(f"\n{self.BG_PC},{self.BG_ABS_PC},{self.BG_DISTANCE_MIN},{self.BG_DISTANCE_MAX},{self.BG_MULT}")
-                    f.write(f"\n{self.IN_MIN_LAT},{self.IN_MIN_LON},{self.IN_MAX_LAT},{self.IN_MAX_LON},{self.IN_RESOLUTION},{self.IN_MODEL}")
+                    f.write(f"\n{self.IN_MIN_LON},{self.IN_MIN_LAT},{self.IN_MAX_LON},{self.IN_MAX_LAT},{self.IN_RESOLUTION},{self.IN_MODEL}")
                     
             rng = np.random.default_rng(self.RANDOM_SEED)
             n_bg = min(self.MAX_BG, self.BG_MULT * self.n_presence)
