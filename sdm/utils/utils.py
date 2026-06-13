@@ -1,5 +1,3 @@
-# to optimize
-
 # sdm/utils/plots.py
 # Библиотека PythonSDM для моделирования распространения видов
 # - набор вспомогательных функций
@@ -16,141 +14,140 @@ from scipy.stats import skew, kurtosis, pearsonr, spearmanr
 from scipy.spatial import ConvexHull
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
+import warnings
 
 
 # Применяет пространственное затухание вокруг точек наблюдения.
 def apply_decay_to_points(
-    input_tiff_path: str,
+    raster_shape: tuple,
+    transform,
     observation_rows: np.ndarray,
     observation_cols: np.ndarray,
     buffer_km: float,
-    decay_type: str = 'exponential',
-    decay_rate: float = 0.1 # Коэффициент затухания (k)
+    decay_type: str = 'buffer',
+    decay_rate: float = 0.1,
+    slope_data: np.ndarray = None,
+    elev_data: np.ndarray = None,
+    water_data: np.ndarray = None,
+    is_bird: bool = False
 ):
     """
-    Применяет пространственное затухание вокруг точек наблюдения.
-
-    Все точки в пределах 'buffer_km' (если decay_type='buffer') или
-    с учетом 'decay_rate' (для других типов затухания) будут изменены.
-    Точки за пределами 'buffer_km' (для 'buffer' типа) или с нулевым
-    значением затухания будут установлены в 0.
+    Создает матрицу пространственного затухания (множителей от 0.0 до 1.0) 
+    вокруг точек наблюдения (M-фактор из фреймворка BAM).
+    
+    Может учитывать сопротивление рельефа (Friction Surface) с помощью 
+    алгоритма Fast Marching (scikit-fmm).
 
     Args:
-        input_tiff_path (str): Путь к однослойному файлу GeoTIFF (EPSG:4326).
-        observation_rows (np.ndarray): Массив индексов строк (y-координат) точек наблюдения (EPSG:4326).
-        observation_cols (np.ndarray): Массив индексов столбцов (x-координат) точек наблюдения (EPSG:4326).
+        raster_shape (tuple): Размеры растра (height, width).
+        transform (affine.Affine): Матрица трансформации растра.
+        observation_rows (np.ndarray): Массив индексов строк точек наблюдения.
+        observation_cols (np.ndarray): Массив индексов столбцов точек наблюдения.
         buffer_km (float): Максимальное расстояние в километрах, вокруг которого будет применяться затухание.
-                           Для decay_type='buffer' это жесткий буфер.
-                           Для других типов используется как начальный радиус или параметр.
-        decay_type (str): Тип затухания. Допустимые значения: 'buffer', 'exponential', 'inverse_quadratic', 'gaussian'.
-        decay_rate (float): Коэффициент затухания (k).
-                           - Для 'exponential': k в e^(-kd).
-                           - Для 'inverse_quadratic': k в 1/(1 + kd^2).
-                           - Для 'gaussian': sigma = 1 / (decay_rate * sqrt(2*pi)) или можно настроить как sigma.
-                                              Здесь я сделаю так, что decay_rate напрямую будет sigma.
+        decay_type (str): Тип затухания ('buffer', 'exponential', 'inverse_quadratic', 'gaussian', 'linear', 'sigmoid').
+        decay_rate (float): Коэффициент затухания (например, sigma для gaussian).
+        slope_data (np.ndarray, optional): 2D массив с уклонами в градусах для учета рельефа.
+        elev_data (np.ndarray, optional): 2D массив с абсолютной высотой (м) для учета климатических пределов.
+        water_data (np.ndarray, optional): 2D массив с % открытой воды (0-100) для водных барьеров.
+        is_bird (bool): Флаг для птиц (игнорируют водные барьеры).
 
     Returns:
-        np.ndarray: Новый растр с примененным затуханием.
+        np.ndarray: 2D матрица множителей (0.0 ... 1.0).
     """
+    if decay_type not in ['buffer', 'exponential', 'inverse_quadratic', 'gaussian', 'linear', 'sigmoid']:
+        raise ValueError("decay_type должен быть одним из: 'buffer', 'exponential', 'inverse_quadratic', 'gaussian', 'linear', 'sigmoid'")
 
-    if decay_type not in ['buffer', 'exponential', 'inverse_quadratic', 'gaussian']:
-        raise ValueError("decay_type должен быть одним из: 'buffer', 'exponential', 'inverse_quadratic', 'gaussian'")
+    presence_mask = np.zeros(raster_shape, dtype=bool)
+    presence_mask[observation_rows, observation_cols] = True
+    
+    # Оцениваем физический размер пикселя (в км) в центре растра для масштабирования
+    geod = pyproj.Geod(ellps='WGS84')
+    mid_row = raster_shape[0] // 2
+    lon1, lat1 = transform * (0, mid_row)
+    lon2, lat2 = transform * (1, mid_row)
+    _, _, pixel_size_m = geod.inv(lon1, lat1, lon2, lat2)
+    pixel_size_km = abs(pixel_size_m) / 1000.0
 
-    with rasterio.open(input_tiff_path) as src:
-        # Проверяем CRS растра
-        if src.crs != CRS.from_epsg(4326):
-            raise ValueError("Входной GeoTIFF должен быть в EPSG:4326")
+    use_fmm = slope_data is not None or elev_data is not None or water_data is not None
 
-        # Загружаем данные растра
-        raster_data = src.read(1)
-        transform = src.transform
-        bounds = src.bounds
-
-        # Создаем копию данных для модификации
-        decayed_raster = np.copy(raster_data)
-
-        # ----- Сверхбыстрая оптимизация: Вычисление расстояний через EDT -----
-        # 1. Создаем бинарную маску точек присутствия
-        presence_mask = np.zeros(raster_data.shape, dtype=bool)
-        presence_mask[observation_rows, observation_cols] = True
+    if use_fmm:
+        try:
+            import skfmm
+            # skfmm ищет нулевой контур (границу между + и -). Задаем фон = 1, точки = -1.
+            phi = np.ones(raster_shape, dtype=np.float32)
+            phi[presence_mask] = -1.0
+            
+            # Базовая скорость перемещения
+            speed = np.ones(raster_shape, dtype=np.float32)
+            
+            # 1. Штраф за крутые уклоны (Горы обходятся "дорого")
+            if slope_data is not None:
+                speed *= np.exp(-np.clip(slope_data, 0, None) / 20.0)
+                
+            # 2. Штраф за высотные барьеры (Экстремальные перевалы и впадины)
+            if elev_data is not None:
+                pres_elevs = elev_data[observation_rows, observation_cols]
+                if len(pres_elevs) > 0:
+                    # Допуск: вид может подняться на 500м из-за потепления, или спуститься на 500м
+                    max_elev = np.nanmax(pres_elevs) + 500.0
+                    min_elev = np.nanmin(pres_elevs) - 500.0
+                    # Если пиксель выше/ниже предела, скорость падает в 20 раз (непроходимая зона)
+                    speed[elev_data > max_elev] *= 0.05
+                    speed[elev_data < min_elev] *= 0.05
+                    
+            # 3. Штраф за водные барьеры (Моря и крупные озера)
+            if water_data is not None and not is_bird:
+                # Если пиксель более чем на 50% состоит из открытой воды, животное не пройдет
+                speed[water_data > 50] *= 0.001
+            
+            speed = np.maximum(speed, 0.001) # Абсолютная защита от деления на ноль
+            
+            # Вычисляем Cost-Distance (Время в пути = эквивалент километров с учетом гор)
+            tt = skfmm.travel_time(phi, speed, dx=pixel_size_km)
+            min_distances_km = np.abs(tt.data)
+            min_distances_km[presence_mask] = 0.0
+        except ImportError:
+            print("\nВНИМАНИЕ: Для учета рельефа/барьеров требуется библиотека 'scikit-fmm'. Выполните 'pip install scikit-fmm'.")
+            print("Используется обычное евклидово расстояние.")
+            min_distances_km = distance_transform_edt(~presence_mask) * pixel_size_km
+    else:
+        # Обычное евклидово расстояние в километрах
+        min_distances_km = distance_transform_edt(~presence_mask) * pixel_size_km
         
-        # 2. Матрица для EDT (0 для присутствий, inf для фона)
-        distance_array = np.full(raster_data.shape, np.inf, dtype=np.float32)
-        distance_array[presence_mask] = 0.0
-        
-        # 3. Вычисляем расстояние в ПИКСЕЛЯХ
-        distances_pixels = distance_transform_edt(distance_array)
-        
-        # 4. Оцениваем физический размер пикселя (в км) в центре растра для масштабирования
-        geod = pyproj.Geod(ellps='WGS84')
-        mid_row = raster_data.shape[0] // 2
-        lon1, lat1 = transform * (0, mid_row)
-        lon2, lat2 = transform * (1, mid_row)
-        _, _, pixel_size_m = geod.inv(lon1, lat1, lon2, lat2)
-        pixel_size_km = abs(pixel_size_m) / 1000.0
-        
-        # 5. Переводим пиксели в километры
-        min_distances_km = distances_pixels * pixel_size_km
+    # Формируем матрицу множителей (от 0.0 до 1.0)
+    multiplier = np.ones(raster_shape, dtype=np.float32)
 
-        # Применение алгоритмов затухания
-        if decay_type == 'buffer':
-            # Жесткий буфер: все, что дальше buffer_km, становится 0
-            decayed_raster[min_distances_km > buffer_km] = 0
-            # Точки наблюдения, которые были изначально 1, должны остаться 1,
-            # но мы работаем с модификацией всего растра, так что это поведение
-            # уже учтено, если исходный растр содержал 1.
-            # Если мы хотим, чтобы НА ВСЕХ ПОВЕРХНОСТЯХ, которые сейчас 0,
-            # где есть точки наблюдения, но они дальше buffer, тоже стало 0,
-            # то это сделано.
+    if decay_type == 'buffer':
+        multiplier[min_distances_km > buffer_km] = 0.0
+    elif decay_type == 'exponential':
+        multiplier = np.exp(-decay_rate * min_distances_km)
+        multiplier[min_distances_km > buffer_km] = 0.0
+    elif decay_type == 'inverse_quadratic':
+        multiplier = 1.0 / (1.0 + decay_rate * (min_distances_km ** 2))
+        multiplier[min_distances_km > buffer_km] = 0.0
+    elif decay_type == 'gaussian':
+        sigma = decay_rate
+        multiplier = np.exp(-(min_distances_km ** 2) / (2.0 * (sigma ** 2)))
+        multiplier[min_distances_km > buffer_km] = 0.0
+    elif decay_type == 'linear':
+        multiplier = 1.0 - (min_distances_km / buffer_km)
+        multiplier[min_distances_km > buffer_km] = 0.0
+    elif decay_type == 'sigmoid':
+        # Сигмоида: плавно падает от 1 до 0. 
+        # Центр падения (0.5) находится на половине буфера.
+        # Крутизна (steepness) настраивается так, чтобы на границе buffer_km значение было около 0.01
+        steepness = 10.0 / buffer_km if buffer_km > 0 else 1.0
+        mid_point = buffer_km / 2.0
+        z = steepness * (min_distances_km - mid_point)
+        z = np.clip(z, -700, 700) # Защита от RuntimeWarning: overflow encountered in exp
+        multiplier = 1.0 / (1.0 + np.exp(z))
+        multiplier[min_distances_km > buffer_km] = 0.0
 
-        elif decay_type == 'exponential':
-            # Функция: f(d) = exp(-decay_rate * d)
-            # Здесь d - это min_distances_km
-            # Устанавливаем значение 0 там, где d > buffer_km (чтобы не экспоненциально уменьшать далеко)
-            decay_factor = np.exp(-decay_rate * min_distances_km)
-            # Применяем буфер, чтобы обрезать влияние дальше buffer_km
-            decay_factor[min_distances_km > buffer_km] = 0
-            # Результат: исходные значения растра * коэффициент затухания
-            # Если исходные значения растра не 0 или 1, а представляют некоторую плотность,
-            # то это будет корректно. Если это бинарный растр (1 - есть, 0 - нет),
-            # то мы просто "размазываем" единицу.
-            decayed_raster = raster_data * decay_factor
-
-        elif decay_type == 'inverse_quadratic':
-            # Функция: f(d) = 1 / (1 + decay_rate * d^2)
-            decay_factor = 1 / (1 + decay_rate * (min_distances_km ** 2))
-            decay_factor[min_distances_km > buffer_km] = 0
-            decayed_raster = raster_data * decay_factor
-
-        elif decay_type == 'gaussian':
-            # Функция: f(d) = exp(-d^2 / (2 * sigma^2))
-            # Здесь sigma = decay_rate (можно настроить)
-            sigma = decay_rate
-            decay_factor = np.exp(-(min_distances_km ** 2) / (2 * (sigma ** 2)))
-            decay_factor[min_distances_km > buffer_km] = 0
-            decayed_raster = raster_data * decay_factor
-
-        if np.nanmin(raster_data) >= 0.0 and np.nanmax(raster_data) <= 1.0: # Быстрая O(N) проверка вместо долгой сортировки np.unique
-             decayed_raster = np.zeros_like(raster_data, dtype=np.float32)
-             # Находим индексы, где исходный растр был 1
-             present_indices = (raster_data == 1)
-             # Применяем рассчитанный фактор затухания только к этим пикселям
-             decayed_raster[present_indices] = decay_factor[present_indices]
-
-        decayed_raster = np.clip(decayed_raster, 0, 1)
-
-        # Обновляем метаданные растра
-        out_meta = src.meta.copy()
-        out_meta.update({
-            "driver": "GTiff",
-            "dtype": rasterio.float32, # Для дробных значений
-            "nodata": src.nodata # Сохраняем оригинальный маркер NoData (обычно np.nan)
-        })
-        
-        
-        with rasterio.open(input_tiff_path, 'w', **out_meta) as dst:
-            dst.write(decayed_raster, 1)
-        print(f"Результат затухания записан в: {input_tiff_path}")
+    # Гарантируем, что в самих точках наблюдений множитель строго равен 1.0
+    multiplier[presence_mask] = 1.0
+    multiplier = np.clip(multiplier, 0.0, 1.0)
+    
+    return multiplier
     
 
 # Предсказывает пригодность местообитаний (suitability) для всего стека предикторов по батчам.
@@ -212,7 +209,7 @@ def wrap_long_lines(text, max_len=60):
 
 
 # Считывает GeoTIFF файл и при необходимости репроецирует его в EPSG:3857 (Web Mercator).
-def read_and_to_3857(path):
+def read_and_to_3857(path, resampling_method=Resampling.bilinear):
     """
     Считывает GeoTIFF файл и при необходимости репроецирует его в EPSG:3857 (Web Mercator).
     
@@ -221,6 +218,7 @@ def read_and_to_3857(path):
     
     Args:
         path (str): Путь к исходному файлу GeoTIFF.
+        resampling_method: Метод ресэмплинга (по умолчанию bilinear). Для категориальных масок нужно Resampling.nearest.
         
     Returns:
         tuple: Кортеж (data, transform, width, height), где:
@@ -252,7 +250,7 @@ def read_and_to_3857(path):
                 src_crs=src_crs,
                 dst_transform=transform,
                 dst_crs=dest_crs,
-                resampling=Resampling.bilinear,
+                resampling=resampling_method,
                 src_nodata=src.nodata,
                 dst_nodata=np.nan,
             )
@@ -327,7 +325,7 @@ def round_to_significant_figures(number: float, sig_digits: int = 4) -> float:
 
 
 # Вычисляет показатель подобия двух гистограмм.
-def calculate_histogram_similarity(data_obs, data_full, bins_num=50, sig_figs=4):
+def calculate_histogram_similarity(data_obs, data_full, bins_num=50, sig_figs=4, bins_range=None):
     """
     Вычисляет показатель подобия двух распределений (гистограмм).
     
@@ -339,6 +337,7 @@ def calculate_histogram_similarity(data_obs, data_full, bins_num=50, sig_figs=4)
         data_full (np.ndarray): Массив значений на всем доступном фоне (ландшафте).
         bins_num (int, optional): Количество интервалов разбиения (бинов). По умолчанию 50.
         sig_figs (int, optional): Количество значащих цифр для округления результата. По умолчанию 4.
+        bins_range (tuple, optional): Кортеж (min, max) для ускорения.
         
     Returns:
         float: Значение от 0.0 до 1.0 (1.0 - максимальное сходство, 0.0 - сходства нет).
@@ -408,9 +407,14 @@ def calculate_histogram_similarity(data_obs, data_full, bins_num=50, sig_figs=4)
         if np.sum(mask) < 2: # Нужно минимум 2 точки для корреляции
             correlation = 0.0
         else:
-            corr_coeff, _ = pearsonr(density_obs[mask], density_full[mask])
-            # Результат pearsonr может быть NaN, если данные очень скудные
-            correlation = corr_coeff if not np.isnan(corr_coeff) else 0.0
+            # Проверка на нулевую дисперсию, чтобы избежать ConstantInputWarning
+            if np.std(density_obs[mask]) < 1e-8 or np.std(density_full[mask]) < 1e-8:
+                correlation = 0.0
+            else:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    corr_coeff, _ = pearsonr(density_obs[mask], density_full[mask])
+                    correlation = corr_coeff if not np.isnan(corr_coeff) else 0.0
             
     except Exception as e:
         print(f"Ошибка при расчете корреляции Пирсона: {e}")
@@ -483,7 +487,9 @@ def get_predictor_stats(data: np.ndarray) -> dict:
         dict: Словарь со статистическими показателями.
     """
     
-    data = data[~np.isnan(data)]
+    # Оптимизация памяти: избегаем копирования 9Мб+ массива, если он уже очищен от NaN
+    if np.isnan(data).any():
+        data = data[~np.isnan(data)]
 
     if data.size == 0:
         return {
@@ -492,33 +498,38 @@ def get_predictor_stats(data: np.ndarray) -> dict:
             'std_dev': np.nan, 'skewness': np.nan, 'kurtosis': np.nan,
         }
     
+    # Оптимизация: вычисляем все процентили за один проход по массиву 
+    p_vals = np.percentile(data, [5, 10, 90, 95])
+    
     stats = {
         'mean': round_to_significant_figures(np.mean(data), 4),
         'median': round_to_significant_figures(np.median(data), 4),
         'min': round_to_significant_figures(np.min(data), 4),
         'max': round_to_significant_figures(np.max(data), 4),
-        'p5': round_to_significant_figures(np.percentile(data, 5), 4),
-        'p95': round_to_significant_figures(np.percentile(data, 95), 4),
-        'width_obs': round_to_significant_figures(np.percentile(data, 90) - np.percentile(data, 10), 4),
+        'p5': round_to_significant_figures(p_vals[0], 4),
+        'p95': round_to_significant_figures(p_vals[3], 4),
+        'width_obs': round_to_significant_figures(p_vals[2] - p_vals[1], 4),
         'std_dev': 0,
         'skewness': 0,
         'kurtosis': 0,
     }
     
     try:
-        stats['std_dev'] = round_to_significant_figures(np.std(data), 4)  # Стандартное отклонение
+        std_val = np.std(data)
+        stats['std_dev'] = round_to_significant_figures(std_val, 4)  # Стандартное отклонение
     except Exception as e:
         print('Ошибка вычисления статистики std_dev: ' + str(e))
+        std_val = 0.0
     
     try:
-        stats['skewness'] = round_to_significant_figures(skew(data), 4)  # Асимметрия (Skewness)
+        if std_val < 1e-8:
+            stats['skewness'] = 0.0
+            stats['kurtosis'] = 0.0
+        else:
+            stats['skewness'] = round_to_significant_figures(skew(data), 4)  # Асимметрия (Skewness)
+            stats['kurtosis'] = round_to_significant_figures(kurtosis(data), 4)  # Эксцесс (Kurtosis)
     except Exception as e:
-        print('Ошибка вычисления статистики skewness: ' + str(e))
-        
-    try:
-        stats['kurtosis'] = round_to_significant_figures(kurtosis(data), 4)  # Эксцесс (Kurtosis)
-    except Exception as e:
-        print('Ошибка вычисления статистики kurtosis: ' + str(e))
+        print('Ошибка вычисления статистики skew/kurtosis: ' + str(e))
     
     return stats
 
@@ -698,12 +709,41 @@ def inverse_scale(scaled_data, scale_params, info):
     if diff:
         mean = mean - diff
     if method == "standard":
-        data = scaled_data * scale + mean
-        if (dsca):
-            data = (scaled_data * scale + mean)/dsca
-        return data
+        # Оптимизация производительности: считаем итоговые скаляры ДО умножения огромных матриц!
+        # Это избавляет Numpy от выделения 4 лишних массивов в оперативной памяти сервера.
+        if dsca:
+            final_scale = scale / dsca
+            final_mean = mean / dsca
+        else:
+            final_scale = scale
+            final_mean = mean
+        return scaled_data * final_scale + final_mean
     else:
         return scaled_data
+
+
+# Рекурсивно заменяет NaN и Infinity на None (null в JSON)
+def clean_nans_for_json(obj):
+    """
+    Рекурсивно заменяет NaN и Infinity на None (null в JSON),
+    чтобы избежать синтаксических ошибок при парсинге клиентами. 
+    NB: В языке Python стандартный модуль json по умолчанию допускает запись значений NaN (Not a Number), 
+    Infinity и -Infinity. Однако официальный стандарт формата JSON (RFC 8259) не поддерживает эти значения.
+    
+    Args:
+        obj: Словарь, список или примитив для очистки.
+        
+    Returns:
+        Очищенный объект.
+    """
+    if isinstance(obj, dict):
+        return {k: clean_nans_for_json(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [clean_nans_for_json(v) for v in obj]
+    elif isinstance(obj, (float, np.floating)):
+        if np.isnan(obj) or np.isinf(obj):
+            return None
+    return obj
 
 
 # Извлекает значения предикторов из 3D-стека по координатам (индексам) пикселей.

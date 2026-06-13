@@ -12,6 +12,7 @@ from rasterio.warp import reproject, Resampling
 from rasterio.transform import array_bounds
 from pyproj import CRS, Transformer
 from matplotlib.ticker import FuncFormatter, MaxNLocator
+import matplotlib.colors as mcolors
 from PIL import Image
 import warnings
 
@@ -555,6 +556,119 @@ def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title='', lons=[], 
     plt.close(fig)
 
 
+# Отрисовывает карту распространения M-фактора во времени (4 периода).
+def draw_m_factor_map(OUTPUT_MFACTOR_TIF, OUTPUT_MFACTOR_JPG, title='', lons=[], lats=[], id=0):
+    """
+    Отрисовывает категориальную карту расширения M-фактора для текущего времени, 2040, 2070 и 2100 годов.
+
+    Args:
+        OUTPUT_MFACTOR_TIF (str): Путь к комбинированному GeoTIFF M-фактора.
+        OUTPUT_MFACTOR_JPG (str): Путь для сохранения JPEG.
+        title (str): Заголовок карты.
+        lons, lats (list/np.ndarray): Координаты наблюдений вида.
+        id (int): Идентификатор задачи.
+    """
+    # Используем nearest, чтобы 4 класса не размылись в дробные значения
+    data, transform, width, height = read_and_to_3857(OUTPUT_MFACTOR_TIF, resampling_method=Resampling.nearest)
+    
+    xmin, ymin, xmax, ymax = array_bounds(height, width, transform)
+    
+    pad_m = 0 
+    xmin_v, xmax_v = xmin - pad_m, xmax + pad_m
+    ymin_v, ymax_v = ymin - pad_m, ymax + pad_m
+    
+    # 4 цвета: от светло-голубого (2100 год) до темно-синего (Текущий ареал)
+    cmap = mcolors.ListedColormap(['#1E88E5', '#42A5F5', '#90CAF9', '#E1F5FE']) 
+    cmap.set_bad(alpha=0.0)
+    bounds = [0.5, 1.5, 2.5, 3.5, 4.5]
+    norm = mcolors.BoundaryNorm(bounds, cmap.N)
+    
+    plt.style.use('classic')
+    
+    width_v = xmax_v - xmin_v
+    height_v = ymax_v - ymin_v
+    ratio = width_v / height_v  
+    
+    long_inches = 10.0
+    desired_long_px = 2000
+    dpi = int(desired_long_px / long_inches)
+    
+    if ratio >= 1.0:
+        fig_w = long_inches
+        fig_h = max(long_inches / ratio, 1e-3)
+    else:
+        fig_h = long_inches
+        fig_w = max(long_inches * ratio, 1e-3)
+    
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
+    fig.patch.set_facecolor('white')  
+    
+    base_fs = plt.rcParams.get('font.size', 10)
+    tick_fs = max(6, int(base_fs * 0.5))   
+    title_fs = max(9, int(base_fs * 0.7))  
+    
+    ax.set_xlim(xmin_v, xmax_v)
+    ax.set_ylim(ymin_v, ymax_v)
+    ax.set_aspect('equal', adjustable='box')
+    
+    try:
+        ctx.add_basemap(ax, source=ctx.providers.OpenStreetMap.Mapnik)
+    except Exception as e:
+        print(f"Не удалось добавить карту OSM: {e}")
+    
+    im = ax.imshow(
+        data, extent=(xmin, xmax, ymin, ymax), origin="upper",
+        cmap=cmap, norm=norm, interpolation="nearest", alpha=0.8
+    )
+    
+    cbar = fig.colorbar(im, ax=ax, fraction=0.035, pad=0.03, ticks=[1, 2, 3, 4])
+    cbar.ax.set_yticklabels(['Текущий', '2040 г.', '2070 г.', '2100 г.'])
+    cbar.set_label("Прогноз расширения доступной зоны")
+    
+    transformer = Transformer.from_crs(CRS("EPSG:4326"), CRS("EPSG:3857"), always_xy=True)
+    x_3857, y_3857 = transformer.transform(lons, lats)
+    
+    if len(lons)>0:
+        ax.scatter(x_3857, y_3857, marker='o', s=25, color='#FF3D00', alpha=0.4, zorder=99, edgecolor='none')
+        ax.scatter(x_3857, y_3857, marker='o', s=8, color='#FFC107', zorder=100, edgecolor='white', linewidth=0.5)
+    
+    transformer_back = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
+    cx = (xmin_v + xmax_v) / 2.0
+    cy = (ymin_v + ymax_v) / 2.0
+    
+    def x_deg_formatter(x, pos):
+        lon, _ = transformer_back.transform(x, cy)
+        return f"{lon:.2f}°"
+    
+    def y_deg_formatter(y, pos):
+        _, lat = transformer_back.transform(cx, y)
+        return f"{lat:.2f}°"
+    
+    ax.xaxis.set_major_formatter(FuncFormatter(x_deg_formatter))
+    ax.yaxis.set_major_formatter(FuncFormatter(y_deg_formatter))
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=6))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=6))
+    
+    ax.tick_params(axis='both', which='major', labelsize=tick_fs, direction='out', top=False, right=False)
+    ax.tick_params(axis='both', which='minor', labelsize=max(6, tick_fs - 1))
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.8)
+        spine.set_edgecolor('#666666')
+    
+    ax.set_title(title if title else "Зоны доступности вида (M-фактор)", pad=8, fontsize=title_fs)
+    plt.tight_layout()
+    
+    font_size_text = 6 
+    bottom_margin = 0.15
+    fig.subplots_adjust(bottom=0.18)
+    text_y_offset_relative = ((font_size_text / 72.0) * 1.5) / fig.get_size_inches()[1]
+    
+    fig.text(0.5, bottom_margin - text_y_offset_relative, "https://wingeds.world/biodiv - карта биоразнообразия Центральной Азии", ha='center', va='bottom', fontsize=font_size_text)
+    fig.text(0.5, bottom_margin - text_y_offset_relative * 2, f"https://wingeds.world/sdm/{id} - модель распространения вида (SDM)", ha='center', va='bottom', fontsize=font_size_text)
+    
+    plt.savefig(OUTPUT_MFACTOR_JPG, dpi=dpi, bbox_inches="tight", facecolor=fig.get_facecolor())
+    plt.close(fig)
+
 # Рисует гистограмму на заданных осях.
 def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, bins_num: int, data_full: np.ndarray, bio_info, title = ''):
     """
@@ -577,27 +691,44 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
         tuple: (stats_data, stats_predictor) - два словаря со статистическими показателями для наблюдений и фона.
     """
     
-    data = data[~np.isnan(data)]
-    data_full = data_full[~np.isnan(data_full)]
-    
     band_info = bio_info.get(band_name) or {}
     min_val = band_info.get('min_val')
     max_val = band_info.get('max_val')
     
+    # Оптимизация памяти и скорости: объединяем фильтры в одну логическую маску.
+    # Это позволяет не копировать массивы элементов в памяти 3 раза подряд.
+    mask_data = ~np.isnan(data)
     if min_val is not None:
-        data = data[data>=min_val]
-        data_full = data_full[data_full>min_val]
+        mask_data &= (data >= min_val)
     if max_val is not None:
-        data = data[data<=max_val]
-        data_full = data_full[data_full<max_val]
+        mask_data &= (data <= max_val)
+    data = data[mask_data]
     
+    mask_full = ~np.isnan(data_full)
+    if min_val is not None:
+        mask_full &= (data_full >= min_val)
+    if max_val is not None:
+        mask_full &= (data_full <= max_val)
+    data_full = data_full[mask_full]
+    
+    # Определяем диапазон бинов один раз ЗДЕСЬ, чтобы не сканировать миллионы точек 
+    # повторно внутри функций similarity и np.histogram
+    if data.size > 0 or data_full.size > 0:
+        bins_range = (np.min(data_full), np.max(data_full))
+        if bins_range[0] == bins_range[1]:
+            val = bins_range[0]
+            bins_range = (val - 0.5, val + 0.5)
+    else:
+        ax.set_title("Нет данных для отображения")
+        return
+        
     stats_data = {}
     stats_predictor = {}
     try:
         # --- Статистика и гистограмма для данных наблюдений (data) ---
         stats_data = get_predictor_stats(data)
         stats_predictor = get_predictor_stats(data_full)
-        stats_data['similarity'] = calculate_histogram_similarity(data, data_full, bins_num)
+        stats_data['similarity'] = calculate_histogram_similarity(data, data_full, bins_num, bins_range=bins_range)
     except Exception as e:
         print('Ошибка вычисления стат показателей диаграм:')
         print(e)
@@ -633,7 +764,8 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
             normalized_counts_data = counts_data / max_count_data if max_count_data > 0 else np.zeros_like(counts_data)
         else:
             normalized_counts_data = np.zeros(bins_num) # Если data пустая, все нормализованные counts = 0
-            bin_edges_data = np.array([]) # Пустые границы, если нет данных
+            # Создаем пустые границы нужного размера, чтобы графики не ломались (shape mismatch)
+            bin_edges_data = np.linspace(bins_range[0], bins_range[1], bins_num + 1)
     except Exception as e:
         print('Ошибка вычисления bins_range')
         print(e)
@@ -646,8 +778,6 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
     
     # --- Определение общей максимальной высоты для графика ---
     total_y_max_normalized = 1.0 # Максимальное значение после нормализации
-    
-    plt.style.use('seaborn-v0_8-whitegrid') # Используйте подходящий стиль
     
     # --- Рисуем гистограмму для всего слоя (data_full) с помощью ax.bar ---
     # Мы рисуем столбец для каждого бина. x - левая граница бина, height - нормализованная частота.
@@ -753,7 +883,11 @@ def add_stats_to_plot(ax: plt.Axes, stats: dict, stats_pred: dict, y_pos: float,
             stats[key] = np.nan # Устанавливаем NaN, если ключ отсутствует
             
     try:
-        broad = round_to_significant_figures(stats.get('width_obs')/stats_pred.get('width_obs'), 2)
+        width_pred = stats_pred.get('width_obs')
+        if width_pred and width_pred > 0:
+            broad = round_to_significant_figures(stats.get('width_obs') / width_pred, 2)
+        else:
+            broad = 0.0
     except Exception as e:
         print("Ошибка вычисления относительной ширины: " + str(e))
         broad = 0

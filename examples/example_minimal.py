@@ -16,10 +16,10 @@ config = {
         'IN_CSV': 'data/falco_peregrinus.csv',
         'IN_CSV_ADDITIONAL': '',
         'PREDICTORS': 'all', # используем все доступные предикторы
-        'IN_MIN_LON': 78.0,
-        'IN_MIN_LAT': 50.0,
-        'IN_MAX_LON': 90.0,
-        'IN_MAX_LAT': 56.0,
+        'IN_MIN_LAT': 78.0,
+        'IN_MIN_LON': 50.0,
+        'IN_MAX_LAT': 90.0,
+        'IN_MAX_LON': 56.0,
         'IN_RESOLUTION': '30s',
         'MODEL_FUTURE': 0, # 0 = не прогнозируем будущее
         'MODEL_SEASON': 0, # 0 = не делаем помесячный прогноз
@@ -39,7 +39,7 @@ config = {
 
 sdm_instance = PythonSDM(config)        # 0) инициализация модели
 sdm_instance.prepare_predictors()       # 1) предварительная подготовка предикторов
-sdm_instance.load_occurences()          # 2) загрузка наблюдений
+sdm_instance.load_occurrences()         # 2) загрузка наблюдений
 sdm_instance.load_predictors()          # 3) загрузка предикторов
 sdm_instance.prepare_data()             # 4) привязка присутствий к пикселям растра и обработка
 sdm_instance.deduplicate_data()         # 5) дедупликация данных

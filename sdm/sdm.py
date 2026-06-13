@@ -9,12 +9,13 @@ import json
 import math
 import glob
 import zipfile
+import time
 import xgboost as xgb
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GroupShuffleSplit
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import roc_auc_score, roc_curve, confusion_matrix, cohen_kappa_score, accuracy_score, f1_score, precision_score
 from rasterio.transform import xy
@@ -26,14 +27,14 @@ from sklearn.calibration import CalibratedClassifierCV
 from .utils.preprocessing import clip_rasters, points_to_pixel_indices, pixel_indices_to_points
 from .utils.data_loader import load_species_occurrence_data, load_environmental_predictors
 from .utils.utils import sample_background, extract_features_from_stack, inverse_scale, continuous_boyce_index
-from .utils.utils import save_geotiff, predict_suitability_for_stack, save_error, get_geotiff_square
+from .utils.utils import save_geotiff, predict_suitability_for_stack, save_error, get_geotiff_square, clean_nans_for_json
 from .utils.utils import apply_decay_to_points, calculate_niche_breadth_pca
-from .utils.plots import create_beautiful_histogram, draw_map, create_animated_gif, create_avi_from_images, plot_roc_auc_curve
+from .utils.plots import create_beautiful_histogram, draw_map, create_animated_gif, create_avi_from_images, plot_roc_auc_curve, draw_m_factor_map
 from .utils.models import MaxEnt
 from .utils.predictors_info import get_predictors_info
 
 class PythonSDM:
-    def __init__(self, config):
+    def __init__(self, config): # 0) Загрузка входных параметров
         
         for attribute_name, attribute_value in config.items(): # заполняем входящие параметры
             setattr(self, attribute_name, attribute_value)
@@ -41,7 +42,7 @@ class PythonSDM:
             
         # для запуска в многопоточном режиме
         j = self.JOBS.get(self.IN_ID)
-        self.ERROR_FILENAME = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_error.txt'
+        self.ERROR_FILENAME = f"output/texts/{self.IN_ID}/{self.IN_ID}_error.txt"
         if not j:
             self.JOBS[self.IN_ID] = {'status': 'queued', 'file': None, 'error': None}
             
@@ -58,23 +59,26 @@ class PythonSDM:
                     return {'status': 'error', 'error': file_content, 'code': 401}
             else:
                 self.JOBS[self.IN_ID]['status'] = 'done'
+                self.is_old_query = True
                 return {'result': 'Ok', 'code': 200}
+            return
         else:
+            # это полноценный запуск новой модели
             print(f"-- Регион для моделирования ({self.IN_ID}): ")
-            print("("+str(self.IN_MIN_LON)+","+str(self.IN_MIN_LAT)+"), ("+str(self.IN_MAX_LON)+","+str(self.IN_MAX_LAT)+"), step: "+self.IN_RESOLUTION)
+            print(f"({self.IN_MIN_LON},{self.IN_MIN_LAT}), ({self.IN_MAX_LON},{self.IN_MAX_LAT}), step: {self.IN_RESOLUTION}")
         
         
         
         self.RANDOM_SEED = 42
         
-        self.OUTPUT_SUITABILITY_TIF = "output/suitability/"+str(self.IN_ID)+"/suitability_"+str(self.IN_ID)+".tif"  # куда сохранить карту пригодности
-        self.OUTPUT_SUITABILITY_JPG = "output/suitability/"+str(self.IN_ID)+"/suitability_"+str(self.IN_ID)+".jpg"
+        self.OUTPUT_SUITABILITY_TIF = f"output/suitability/{self.IN_ID}/suitability_{self.IN_ID}.tif"  # куда сохранить карту пригодности
+        self.OUTPUT_SUITABILITY_JPG = f"output/suitability/{self.IN_ID}/suitability_{self.IN_ID}.jpg"
         self.OUTPUT_HISTOGRAMS_DIR = "output/gistos"
         self.OUTPUT_PREDICTIONS_DIR = "output/predictions"
         self.OUTPUT_PAST_DIR = "output/past"
         self.OUTPUT_SEASONS_DIR = "output/seasons"
         
-        self.OUTPUT_ROC_AUC_JPG = "output/aucs/"+str(self.IN_ID)+'/roc-auc.jpg'
+        self.OUTPUT_ROC_AUC_JPG = f"output/aucs/{self.IN_ID}/roc-auc.jpg"
         
         self.OUTPUT_FUTURE_DIR = os.path.join(self.OUTPUT_PREDICTIONS_DIR, str(self.IN_ID))
         self.OUTPUT_PAST_DIR = os.path.join(self.OUTPUT_PAST_DIR, str(self.IN_ID))
@@ -83,10 +87,10 @@ class PythonSDM:
         self.RAW_RASTER_DIR = "input_predictors"
         self.PREDICTORS_JPEGS = "output/predictors_jpegs"
         
+        
         self.SCALES_FILE = os.path.join(self.RAW_RASTER_DIR, 'predictors_scales.json')
         
-        self.OUTPUT_RASTER_DIR = "output_predictors/"+self.IN_RESOLUTION+"/("+str(self.IN_MIN_LON)+","\
-                                +str(self.IN_MIN_LAT)+"), ("+str(self.IN_MAX_LON)+","+str(self.IN_MAX_LAT)+")"
+        self.OUTPUT_RASTER_DIR = f"output_predictors/{self.IN_RESOLUTION}/({self.IN_MIN_LON},{self.IN_MIN_LAT}), ({self.IN_MAX_LON},{self.IN_MAX_LAT})"
         self.RASTER_DIR = self.OUTPUT_RASTER_DIR # папка с GeoTIFF-предикторами
         
         if self.SCENARIOS == 'all':
@@ -103,40 +107,33 @@ class PythonSDM:
         #self.MINIMUM_YEAR_ALLOWED = 1980
         self.MINIMUM_YEAR_ALLOWED = 2000
 
+        # какой метод затухания распространения вида использовать (M-фактор из BAM-фреймворка)
+        self.M_FACTOR_DECAY_TYPE = 'sigmoid'
+
         # начали
         np.random.seed(self.RANDOM_SEED)
         
-        self.TEXT_FILENAME = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'.txt'
-        self.ERROR_FILENAME = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_error.txt'
-        self.PRED_FILENAME = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_pred.txt'
-        #self.STACK_FILENAME = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_stack.txt' # больше не нужно
-        self.MONTH_FILENAME = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_month.txt'
-        self.CSV_FILENAME = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'.csv'
-        self.CSV_FILENAME_ADD = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_add.csv'
-        self.CSV_FILTERED_FILENAME = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_filtered.csv'
-        self.GISTO_STATS = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_gistos.js'
-        self.FUTURE_SUITS = 'output/texts/'+str(self.IN_ID)+'/'+str(self.IN_ID)+'_futures.js'
+        self.TEXT_FILENAME = f"output/texts/{self.IN_ID}/{self.IN_ID}.txt"
+        self.PRED_FILENAME = f"output/texts/{self.IN_ID}/{self.IN_ID}_pred.txt"
+        self.MONTH_FILENAME = f"output/texts/{self.IN_ID}/{self.IN_ID}_month.txt"
+        self.CSV_FILENAME = f"output/texts/{self.IN_ID}/{self.IN_ID}.csv"
+        self.CSV_FILENAME_ADD = f"output/texts/{self.IN_ID}/{self.IN_ID}_add.csv"
+        self.CSV_FILTERED_FILENAME = f"output/texts/{self.IN_ID}/{self.IN_ID}_filtered.csv"
+        self.GISTO_STATS = f"output/texts/{self.IN_ID}/{self.IN_ID}_gistos.js"
+        self.FUTURE_SUITS = f"output/texts/{self.IN_ID}/{self.IN_ID}_futures.js"
         
-        # создаём корневые папки для результатов моделирования
-        os.makedirs('output/texts/', exist_ok=True)
-        os.makedirs('output/suitability/', exist_ok=True)
-        os.makedirs('output/aucs/', exist_ok=True)
-        os.makedirs('output/gistos/', exist_ok=True)
-        os.makedirs('output/predictions/', exist_ok=True)
-        os.makedirs('output/past/', exist_ok=True)
-        os.makedirs('output/seasons/', exist_ok=True)
-        os.makedirs('output/predictors_jpegs/', exist_ok=True)
-        
-        # создаём папки для результатов этой модели
-        os.makedirs('output/texts/'+str(self.IN_ID)+'/', exist_ok=True)
-        os.makedirs('output/suitability/'+str(self.IN_ID)+'/', exist_ok=True)
-        os.makedirs('output/aucs/'+str(self.IN_ID)+'/', exist_ok=True)
+        base_dirs = ['texts', 'suitability', 'aucs', 'gistos', 'predictions', 'past', 'seasons', 'predictors_jpegs']
+        for d in base_dirs:
+            # Создаем корневую директорию
+            os.makedirs(f"output/{d}/", exist_ok=True)
+            # Создаем директорию конкретно для этой задачи (там, где это применимо)
+            if d in ['texts', 'suitability', 'aucs']:
+                os.makedirs(f"output/{d}/{self.IN_ID}/", exist_ok=True)
         
         self.bio_info = get_predictors_info()
     
     
-    def prepare_predictors(self):
-        # 1) Подготовка предикторов к нужным координатам
+    def prepare_predictors(self): # 1) Подготовка предикторов к нужным координатам
         print(f"\n-- 1. Подготовка предикторов ({self.IN_ID})")
         try:
             clip_rasters(self.RAW_RASTER_DIR, self.OUTPUT_RASTER_DIR, self.IN_MIN_LAT, self.IN_MIN_LON,
@@ -144,10 +141,11 @@ class PythonSDM:
         except Exception as e:
             print('Ошибка подготовки предикторов:')
             print(e)
+            save_error(self.ERROR_FILENAME, e)
+            return {'status': 'terminated', 'error': str(e), 'code': 401}
         
     
-    def load_occurences(self):
-        # 2) Загрузка присутствий
+    def load_occurrences(self): # 2) Загрузка присутствий
         print(f"\n-- 2. Загрузка наблюдений ({self.IN_ID})")
         
         try:
@@ -174,8 +172,7 @@ class PythonSDM:
         self.dclass = ret['dclass']
     
     
-    def load_predictors(self, period = 'current', month = ''):
-        # 3) Загрузка стека предикторов
+    def load_predictors(self, period = 'current', month = ''): # 3) Загрузка стека предикторов
         print(f"\n-- 3. Загрузка предикторов ({self.IN_ID})")
         try:
             if os.path.exists(self.SCALES_FILE):
@@ -189,10 +186,11 @@ class PythonSDM:
             if period == 'current':
                 self.stack, self.valid_mask, self.transform, self.crs, self.profile, self.band_names, self.band_paths = \
                     load_environmental_predictors(self.RASTER_DIR, self.PREDICTORS, scales = self.scales_config, bio_info = self.bio_info)
-            
-            if period == 'monthly':
+            elif period == 'monthly':
                 self.stack, self.valid_mask, self.transform, self.crs, self.profile, self.band_names, self.band_paths = \
                     load_environmental_predictors(self.RASTER_DIR, self.PREDICTORS, period = 'monthly', interval = month, bio_info = self.bio_info)
+            else:
+                raise ValueError(f"Неподдерживаемый период загрузки предикторов: {period}")
             
             self.bands, self.H, self.W = self.stack.shape
         except Exception as e:
@@ -207,23 +205,12 @@ class PythonSDM:
             with open(self.TEXT_FILENAME, 'a') as f:
                 f.write(f"\n{self.bands} | Размер: {self.H} x {self.W} | CRS: {self.crs}")
                 f.write(f"\n{self.band_names}")
-            
-            try:
-                basepath = 'output_predictors/'
-                # больше не упаковываем предикторы в отдельные архивы, сохраняем напрямую
-                #with zipfile.ZipFile(self.PREDICTORS_JPEGS+"/"+str(self.IN_ID)+".zip", "w", compression=zipfile.ZIP_DEFLATED) as z:
-                #    for p in map(Path, self.band_paths):
-                #        z.write(p, arcname=p.relative_to(basepath))  # все файлы в корне архива
-            except Exception as e:
-                print(e)
-            print("Проекции предикторов сохранены в архив")
     
     
-    def prepare_data(self, month = 0):
-        # 4) Привязка присутствий к пикселям растра и фильтрация по маске валидности
+    def prepare_data(self, month = 0): # 4) Привязка присутствий к пикселям растра и фильтрация по маске валидности
         print(f"\n-- 4. Привязка присутствий к пикселям растра и фильтрация по маске валидности ({self.IN_ID})")
         if (month!=0):
-            self.occ = self.source_occ.dropna()
+            self.occ = self.source_occ.dropna().copy()
             self.occ.loc[:, 'month'] = self.occ['month'].astype(int)
             self.occ = self.occ[(self.occ['month'])==month]
         else:
@@ -233,10 +220,11 @@ class PythonSDM:
                                                      self.transform, self.W, self.H)
         # Фильтруем те, что внутри растра
         rows, cols = rows[inside], cols[inside]
-        # И те, что попадают на валидные пиксели (без NaN во всех слоях)
-        # NB: если использовать valid_mask из всех слоёв - сильно портится результат
-        #valid_here = self.valid_mask[rows, cols]
-        #rows, cols = rows[valid_here], cols[valid_here]
+
+        # Обязательно фильтруем точки, попавшие в зоны NoData (океан за пределами 50 пикс).
+        # С новой экстраполяцией в data_loader это безопасно и спасает деревья решений от NaN-ошибок.
+        valid_here = self.valid_mask[rows, cols]
+        rows, cols = rows[valid_here], cols[valid_here]
         
         print(f"Присутствий внутри валидной области: {len(rows)}")
         
@@ -244,50 +232,44 @@ class PythonSDM:
             with open(self.TEXT_FILENAME, 'a') as f:
                 f.write(f"\n{len(rows)}")
         
-        if len(rows)<10 and month=='':
+        if len(rows)<10 and month==0:
             print('Not enough points in region')
             save_error(self.ERROR_FILENAME, f"Внутри области моделирования недостаточно точек. Должно быть не менее 10, сейчас: {len(rows)}.")
             return {'status': 'terminated', 'error': f"Внутри области моделирования недостаточно точек. Должно быть не менее 10, сейчас: {len(rows)}.", 'code': 401}
         
         # 4.1) создаём полные растры для всего спектра слоёв-предикторов
         print(f"-- 4.1. Создаём полные растры для всего спектра слоёв-предикторов ({self.IN_ID})")
-        rows_grid, cols_grid = np.indices((self.H, self.W))
-        
-        # Преобразуем их в одномерные массивы
-        rows_full_flat = rows_grid.flatten()
-        cols_full_flat = cols_grid.flatten()
-        
-        # 4.2) Фильтруем эти полные индексы по маске валидности
-        # valid_mask[rows_full_flat, cols_full_flat] вернет булеву маску для каждого пикселя
-        # True, если пиксель валиден, False - если NaN
-        valid_pixels_mask = self.valid_mask[rows_full_flat, cols_full_flat]
-        
-        # Применяем булеву маску, чтобы получить только валидные индексы
-        # NB: если использовать valid_mask из всех слоёв - сильно портится результат
-        self.rows_full = rows_full_flat #[valid_pixels_mask]
-        self.cols_full = cols_full_flat #[valid_pixels_mask]
+        self.rows_full, self.cols_full = np.nonzero(self.valid_mask)
         
         self.rows = rows
         self.cols = cols
         
         
-    def deduplicate_data(self, month = 0):
-        # 5) Дедупликация по пикселю (30″ клетка) — оставляем по одному наблюдению на клетку
+    def deduplicate_data(self, month = 0): # 5) Дедупликация по пикселю (30″ клетка) — оставляем по одному наблюдению на клетку
         print(f"\n-- 5. Дедупликация по пикселю — оставляем по одному наблюдению на клетку ({self.IN_ID})")
-        self.pres_rc = pd.DataFrame({"r": self.rows, "c": self.cols}).drop_duplicates().values
+        
+        # Оставляем строго 1 точку на 1 уникальный пиксель растра
+        # Spatial thinning не делаем. Метод не показал пользы, см. модели №50201, 50204, 50203
+        df_pres = pd.DataFrame({"r": self.rows, "c": self.cols})
+        df_pixel_thinned = df_pres.drop_duplicates(subset=["r", "c"])
+        
+        self.pres_rc = df_pixel_thinned[["r", "c"]].values
+        
         rows_p = self.pres_rc[:, 0]
         cols_p = self.pres_rc[:, 1]
+
         n_presence = len(rows_p)
         if n_presence < 20:
             print("Внимание: очень мало уникальных присутствий в пределах растра.")
-        print(f"Уникальных присутствий (по пикселю): {n_presence}")
+        print(f"Уникальных присутствий по точкам растра: {n_presence}")
+
         
         if n_presence<5 and month==0:
             print('Not enough unique points in region')
             save_error(self.ERROR_FILENAME, f"Внутри области моделирования очень мало уникальных присутствий. Должно быть не менее 5, сейчас: {n_presence}.")
             return {'status': 'terminated', 'error': f"Внутри области моделирования очень мало уникальных присутствий. Должно быть не менее 5, сейчас: {n_presence}.", 'code': 401}
         
-        self.rows_coord, self.cols_coord, inside = pixel_indices_to_points(rows_p, cols_p, self.transform, self.W, self.H)
+        self.pres_lons, self.pres_lats, inside = pixel_indices_to_points(rows_p, cols_p, self.transform, self.W, self.H)
         
         if month==0:
             with open(self.TEXT_FILENAME, 'a') as f:
@@ -298,8 +280,7 @@ class PythonSDM:
         self.cols_p = cols_p
 
 
-    def generate_bg_pa(self, month = 0):
-        # 6) Генерация фоновых точек и точек псевдоотсутствия, а также фактора мобильности
+    def generate_bg_pa(self, month = 0): # 6) Генерация фоновых точек и точек псевдоотсутствия, а также фактора мобильности
         print(f"\n-- 6. Генерация фоновых точек и точек псевдоотсутствия ({self.IN_ID})")
         
         # границы распространения вида, фактор мобильности по умолчанию
@@ -311,47 +292,107 @@ class PythonSDM:
         # 6.1) если нужно генерировать точки псевдоотсутствия, но параметры заданы на авто
         if self.BG_PC!=100 and self.BG_DISTANCE_MIN==0:
             print("Нужно генерировать точки псевдоприсутствия, и параметры огибающих заданы на авто. Определяем их.")
+
+            # Оцениваем физический размер пикселя в километрах для текущего разрешения растра
+            if self.IN_RESOLUTION == '30s':
+                pixel_size_km = 1.0
+            elif self.IN_RESOLUTION == '1m':
+                pixel_size_km = 2.0
+            elif self.IN_RESOLUTION == '5m':
+                pixel_size_km = 10.0
+            else:
+                pixel_size_km = 1.0
+                
+
             if len(self.kingdom)==1 and len(self.dclass)<=1:
-                # значения по умолчанию
-                self.BG_DISTANCE_MIN = 10
-                self.BG_DISTANCE_MAX = 20
+                # значения по умолчанию В КИЛОМЕТРАХ
+                bg_min_km = 10.0
+                bg_max_km = 20.0
                 
                 # вычисляем параметры
                 if self.dclass==['Aves']: # Птицы
-                    self.BG_DISTANCE_MIN = 50
-                    self.BG_DISTANCE_MAX = 100
+                    bg_min_km = 50.0
+                    bg_max_km = 100.0
                     
-                    rec_mf_cur = 1000
-                    rec_mf_2040 = 2000
-                    rec_mf_2070 = 3000
-                    rec_mf_2100 = 4000
+                    # Зона M (доступность). Базовый радиус: 500 км.
+                    # Скорость расширения (дельта): ~150 км за 30 лет
+                    rec_mf_cur = 500
+                    rec_mf_2040 = 650
+                    rec_mf_2070 = 800
+                    rec_mf_2100 = 950
                     
                 if self.dclass==['Mammalia']: # Млекопитающие
-                    self.BG_DISTANCE_MIN = 20
-                    self.BG_DISTANCE_MAX = 50
+                    bg_min_km = 20.0
+                    bg_max_km = 50.0
                     
-                    rec_mf_cur = 400
-                    rec_mf_2040 = 800
-                    rec_mf_2070 = 1200
-                    rec_mf_2100 = 1600
+                    # Скорость расширения: ~30 км за 30 лет (усредненно для грызунов и хищников)
+                    rec_mf_cur = 200
+                    rec_mf_2040 = 230
+                    rec_mf_2070 = 260
+                    rec_mf_2100 = 290
                     
                 if self.dclass==['Amphibia']: # Амфибии
-                    self.BG_DISTANCE_MIN = 20
-                    self.BG_DISTANCE_MAX = 50
+                    bg_min_km = 10.0
+                    bg_max_km = 50.0
                     
-                    rec_mf_cur = 200
-                    rec_mf_2040 = 400
-                    rec_mf_2070 = 600
-                    rec_mf_2100 = 800
+                    # Крайне низкая мобильность. Базовая зона M узкая (50 км). 
+                    # Расширение: ~5 км за 30 лет
+                    # В будущем здесь стоит прикрутить Cost-Distance (Friction Surface)
+                    # с высоким "штрафом" за отсутствие влажности и водоемов.
+                    rec_mf_cur = 50
+                    rec_mf_2040 = 55
+                    rec_mf_2070 = 60
+                    rec_mf_2100 = 65
                     
                 if self.dclass==['Squamata'] or self.dclass==['Testudines']: # Рептилии
-                    self.BG_DISTANCE_MIN = 20
-                    self.BG_DISTANCE_MAX = 50
+                    bg_min_km = 10.0
+                    bg_max_km = 50.0
                     
+                    # Расширение: ~10 км за 30 лет
+                    rec_mf_cur = 100
+                    rec_mf_2040 = 110
+                    rec_mf_2070 = 120
+                    rec_mf_2100 = 130
+                
+                if self.kingdom==['Plantae']: # Растения
+                    bg_min_km = 10.0
+                    bg_max_km = 50.0
+                    
+                    # Растения мигрируют медленно (семена/вегетативно), но имеют Long-Distance Dispersal.
+                    # Расширение: ~15 км за 30 лет.
+                    rec_mf_cur = 100
+                    rec_mf_2040 = 110
+                    rec_mf_2070 = 120
+                    rec_mf_2100 = 130
+                    #self.M_FACTOR_DECAY_TYPE = 'inverse_quadratic' # Тяжелые хвосты (Long-Distance Dispersal)
+                
+                if self.kingdom==['Fungi']: # Грибы
+                    bg_min_km = 10.0
+                    bg_max_km = 50.0
+                    
+                    # Споры разлетаются далеко, но успешное укоренение требует времени.
+                    # Расширение: ~30 км за 30 лет.
+                    rec_mf_cur = 100
+                    rec_mf_2040 = 130
+                    rec_mf_2070 = 160
+                    rec_mf_2100 = 190
+                    #self.M_FACTOR_DECAY_TYPE = 'exponential' # Экспоненциальное затухание облака спор
+                
+                if self.dclass==['Insecta']: # Насекомые
+                    bg_min_km = 20.0
+                    bg_max_km = 100.0
+                    
+                    # Высокая мобильность, быстро следуют за потеплением климата
                     rec_mf_cur = 200
-                    rec_mf_2040 = 400
-                    rec_mf_2070 = 600
-                    rec_mf_2100 = 800
+                    rec_mf_2040 = 250
+                    rec_mf_2070 = 300
+                    rec_mf_2100 = 350
+                    #self.M_FACTOR_DECAY_TYPE = 'gaussian' # Диффузное активное расселение
+                
+                
+                # Переводим физические километры в пиксели растра (шаги сетки)
+                self.BG_DISTANCE_MIN = int(max(1, np.round(bg_min_km / pixel_size_km)))
+                self.BG_DISTANCE_MAX = int(max(2, np.round(bg_max_km / pixel_size_km)))
             else:
                 self.BG_PC = 100
         
@@ -373,9 +414,9 @@ class PythonSDM:
         
         try:
             # 6.2) Генерация фоновых точек
-            if (self.IN_MODEL=='MaxEnt'):
+            if (self.IN_MODEL=='MaxEnt'): # какие-то значения для вывода, реально будет self.MAX_BG
                 self.BG_MULT = 20
-                self.BG_ABS_PC = 0
+                self.BG_ABS_PC = 0 # не генерируем точки псевдоотсутствия
                 self.BG_PC = 100
             else:
                 self.BG_ABS_PC = 100 - self.BG_PC
@@ -386,7 +427,15 @@ class PythonSDM:
                     f.write(f"\n{self.IN_MIN_LON},{self.IN_MIN_LAT},{self.IN_MAX_LON},{self.IN_MAX_LAT},{self.IN_RESOLUTION},{self.IN_MODEL}")
                     
             rng = np.random.default_rng(self.RANDOM_SEED)
-            n_bg = min(self.MAX_BG, self.BG_MULT * self.n_presence)
+            
+            if self.IN_MODEL == 'MaxEnt':
+                # MaxEnt требует интеграции по всему ландшафту.
+                # Обычно используют 10 000 точек (self.MAX_BG) независимо от n_presence.
+                n_bg = self.MAX_BG
+            else:
+                # Для RF и XGBoost сохраняем пропорцию классов
+                n_bg = min(self.MAX_BG, int(self.BG_MULT * self.n_presence))
+            
             
             self.rows_bg, self.cols_bg, self.rows_random, self.cols_random, self.rows_buffer, self.cols_buffer = sample_background(self.valid_mask,
                                                            set(map(tuple, self.pres_rc)), n_bg,
@@ -399,8 +448,7 @@ class PythonSDM:
             print(e)
 
     
-    def extract_features(self):
-        # 7) Извлечение признаков
+    def extract_features(self): # 7) Извлечение признаков
         print(f"\n-- 7. Извлечение признаков ({self.IN_ID})")
         self.X_pres = extract_features_from_stack(self.stack, self.rows_p, self.cols_p)
         self.X_bg = extract_features_from_stack(self.stack, self.rows_bg, self.cols_bg)
@@ -411,46 +459,34 @@ class PythonSDM:
         print(f"Матрица признаков: {self.X.shape}, классы: {np.bincount(self.y)}")
 
 
-    def draw_gistos(self):
-        # 8) постройка гистограмм
+    def draw_gistos(self): # 8) постройка гистограмм
         if self.DO_GISTO == 1:
             print(f"\n-- 8. Постройка гистограмм ({self.IN_ID})")
             num_predictors = len(self.band_names) # Получаем точное количество предикторов
             
-            # Динамически определяем количество строк и столбцов для сетки
-            # Делаем сетку максимально приближенной к квадрату
-            cols_num = int(math.ceil(math.sqrt(num_predictors))) # Количество столбцов
-            rows_num = int(math.ceil(num_predictors / cols_num))       # Количество строк
-            
-            # Создаем фигуру с учетом динамических размеров
-            fig, axes = plt.subplots(rows_num, cols_num, figsize=(cols_num * 5.5, rows_num * 4)) # Увеличенный размер для лучшего размещения
-            
-            # Если у нас только один предиктор, axes будет не массивом, а одним объектом Axes
-            if num_predictors == 1:
-                axes = np.array([axes])
-            elif num_predictors == 0:
-                axes = np.array([]) # Пустой массив, если нет предикторов
-            
-            # Регулируем количество бинов, если оно больше, чем количество уникальных значений (что маловероятно, но для безопасности)
-            bins_num = 50
-            if bins_num > len(np.unique(self.X_pres)):
-                bins_num = len(np.unique(self.X_pres))
-                print(f"Количество бинов было уменьшено до {bins_num}, так как оно превышало количество уникальных значений.")
+            if num_predictors == 0:
+                print("Нет предикторов для построения гистограмм.")
+                return
             
             gistos_info = {}
             
             # --- Сохранение каждой гистограммы в отдельный файл ---
-            # Пересоздаем фигуру и оси для сохранения, чтобы они были независимы от plt.show()
-            # Это важно, чтобы сохранить чистые изображения без лишних элементов, добавленных plt.show()
-            # (хотя в данном случае plt.show() уже показал, но для чистоты процесса сохранения)
-            #print(num_predictors)
-            # Нужно заново пройтись по данным, чтобы сохранить каждую гистограмму отдельно
+            # Оптимизация: Создаем фигуру ОДИН РАЗ вне цикла. 
+            # Создание фигуры в Matplotlib - очень "дорогая" операция для CPU.
+            fig_single, ax_single = plt.subplots(1, 1, figsize=(7, 5))
+            
             for i, band_name in enumerate(self.band_names):
-                # Создаем новую фигуру для каждого графика
-                fig_single, ax_single = plt.subplots(1, 1, figsize=(7, 5)) # Размер одного графика
+                ax_single.clear() # Очищаем оси перед новым графиком
                 # Получаем масштабированные данные (они уже в X_pres)
                 scaled_data_for_plot = self.X_pres[:, i]
                 scaled_data_for_plot_full = self.X_full[:, i]
+                
+                # Индивидуальная регулировка количества бинов (защита для категориальных слоев)
+                bins_num = 50
+                unique_vals = len(np.unique(scaled_data_for_plot))
+                if unique_vals > 0 and bins_num > unique_vals:
+                    bins_num = unique_vals
+                    print(f"Количество бинов для '{band_name}' уменьшено до {bins_num} по числу уникальных значений.")
                 
                 # Получаем параметры масштабирования для текущего предиктора
                 # Убедитесь, что band_name соответствует ключам в scales_config
@@ -488,16 +524,18 @@ class PythonSDM:
                 dir_path = os.path.join(self.OUTPUT_HISTOGRAMS_DIR, str(self.IN_ID))
                 os.makedirs(dir_path, exist_ok=True)
                 output_filename = os.path.join(self.OUTPUT_HISTOGRAMS_DIR, str(self.IN_ID), f"{safe_band_name}.png")
-                # Сохраняем фигуру
-                plt.savefig(output_filename, dpi=200, bbox_inches='tight') # dpi для качества, bbox_inches='tight' для обрезки лишних полей
+                
+                fig_single.tight_layout()
+                plt.savefig(output_filename, dpi=100) 
                 print(f"Сохранена гистограмма: {i} - {output_filename}")
-                plt.close(fig_single) # Закрываем фигуру, чтобы освободить память
-            plt.close(fig)
+                # plt.close(fig_single) - БОЛЬШЕ НЕ ЗАКРЫВАЕМ ВНУТРИ ЦИКЛА
             
+            plt.close(fig_single) # Закрываем один раз после завершения всех предикторов
+            clean_gistos_info = clean_nans_for_json(gistos_info)
             with open(self.GISTO_STATS, 'a') as f:
-                json.dump(gistos_info, f, ensure_ascii=False, indent=4)
+                json.dump(clean_gistos_info, f, ensure_ascii=False, indent=4)
             
-            print(f"Все гистограммы сохранены в папку: '{self.OUTPUT_HISTOGRAMS_DIR}\{self.IN_ID}'")
+            print(f"Все гистограммы сохранены в папку: '{self.OUTPUT_HISTOGRAMS_DIR}/{self.IN_ID}'")
             
             archive_name = "histos.zip"
             archive_path = os.path.join(dir_path, archive_name)
@@ -507,7 +545,7 @@ class PythonSDM:
             
             # 8.2. Проверяем, есть ли вообще файлы для упаковки, пакуем
             if not files_to_zip:
-                print(f"В папке {self.OUTPUT_HISTOGRAMS_DIR}\{self.IN_ID} нет файлов для упаковки.")
+                print(f"В папке {self.OUTPUT_HISTOGRAMS_DIR}/{self.IN_ID} нет файлов для упаковки.")
             else:
                 # 3. Создаем ZIP-архив
                 with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
@@ -516,11 +554,10 @@ class PythonSDM:
                         # что в архиве будут только имена файлов, а не полные пути.
                         zipf.write(file_path, os.path.basename(file_path))
                 
-                print(f"Все файлы из '{self.OUTPUT_HISTOGRAMS_DIR}\{self.IN_ID}' успешно упакованы в '{archive_path}'.")
+                print(f"Все файлы из '{self.OUTPUT_HISTOGRAMS_DIR}/{self.IN_ID}' успешно упакованы в '{archive_path}'.")
 
 
-    def split_train_test(self):
-        # 9) Разделение на train/test
+    def split_train_test(self): # 9) Разделение на train/test
         print(f"\n-- 9. Разделение на train/test ({self.IN_ID})")
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
             self.X, self.y, test_size=0.2, stratify=self.y, random_state=self.RANDOM_SEED
@@ -529,58 +566,45 @@ class PythonSDM:
         
     def train_model(self, month = 0):
         # 10) Обучение модели
-        print(f"\n-- 10. Обучение модели ({self.IN_ID})")
+        print(f"\n-- 10. Обучение валидационной модели (на {len(self.X_train)} точках) ({self.IN_ID})")
         
+        # --- 1. ОБУЧЕНИЕ МОДЕЛИ ДЛЯ ОЦЕНКИ (На Train выборке) ---
+        # Эта модель используется ТОЛЬКО для получения честных метрик. Она не видит 20% карты.
         try:
             if (self.IN_MODEL=='MaxEnt'):
-                self.model = MaxEnt(X_pres=self.X_pres, X_bg=self.X_bg)
-                self.model.fit(
-                    maxiter=500,
-                    tol=1e-5
+                # Выделяем присутствия и фон из обучающей выборки для честного тестирования MaxEnt
+                X_train_pres = self.X_train[self.y_train == 1]
+                X_train_bg = self.X_train[self.y_train == 0]
+                eval_model = MaxEnt(X_pres=X_train_pres, X_bg=X_train_bg)
+                eval_model.fit(maxiter=500, tol=1e-5)
+                
+            elif (self.IN_MODEL=='RandomForest'):
+                eval_model = RandomForestClassifier(
+                    n_estimators=500, n_jobs=-1, random_state=self.RANDOM_SEED, 
+                    class_weight="balanced_subsample", max_depth=10
                 )
+                eval_model.fit(self.X_train, self.y_train)
+                
+            elif (self.IN_MODEL=='XGBoost'):
+                eval_model = xgb.XGBClassifier(
+                    objective='binary:logistic', n_estimators=500, learning_rate=0.05, 
+                    max_depth=10, subsample=0.8, colsample_bytree=0.8, 
+                    random_state=self.RANDOM_SEED, n_jobs=-1, eval_metric='auc', tree_method='hist'
+                )
+                eval_model.fit(self.X_train, self.y_train)
         except Exception as e:
-            print(e)
+            print('Ошибка обучения валидационной модели')
+            print(str(e))
             save_error(self.ERROR_FILENAME, e)
             return {'status': 'terminated', 'error': str(e), 'code': 401}
             
+        print('Обучение валидационной модели завершено')
         
-        if (self.IN_MODEL=='RandomForest'):
-            self.model = RandomForestClassifier(
-                n_estimators=500,
-                n_jobs=-1,
-                random_state=self.RANDOM_SEED,
-                class_weight="balanced_subsample",
-                max_depth=10
-            )
-            self.model.fit(self.X_train, self.y_train)
+        print(f"\n-- 10А. Вычисление честных метрик на отложенных блоках ({self.IN_ID})")
         
         try:
-            if (self.IN_MODEL=='XGBoost'):
-                self.model = xgb.XGBClassifier(
-                    objective='binary:logistic',
-                    n_estimators=500,        # Количество деревьев
-                    learning_rate=0.05,      # Скорость обучения
-                    max_depth=10,             # Максимальная глубина деревьев
-                    subsample=0.8,           # Доля объектов для обучения каждого дерева
-                    colsample_bytree=0.8,    # Доля признаков для обучения каждого дерева
-                    random_state=self.RANDOM_SEED,
-                    n_jobs=-1,               # Использовать все доступные ядра CPU
-                    eval_metric='auc',
-                    tree_method='hist'       # Хорошо работает с большими данными
-                )
-                
-                self.model.fit(self.X_train, self.y_train)
-        except Exception as e:
-            print('Ошибка обучения')
-            print(e)
-            
-        print('Обучение завершено')
-        
-        print(f"\n-- 10А. Вычисление метрик ({self.IN_ID})")
-        
-        try:
-            # вычисление ROC-AUC
-            y_prob = self.model.predict_proba(self.X_test)[:, 1]
+            # вычисление вероятностей на отложенной (тестовой) выборке
+            y_prob = eval_model.predict_proba(self.X_test)[:, 1]
 
             # вычисление Continuous Boyce Index (CBI)
             obs_prob = y_prob[self.y_test == 1]
@@ -634,6 +658,32 @@ class PythonSDM:
         except Exception as e:
             print('Ошибка оценки качества модели')
             print(e)
+            
+        # --- 2. ОБУЧЕНИЕ ФИНАЛЬНОЙ МОДЕЛИ (На ВСЕХ данных) ---
+        # Эта модель пойдет в predict_current для отрисовки полной и точной карты
+        print(f"\n-- 10Б. Обучение финальной боевой модели на 100% данных ({self.IN_ID})")
+        try:
+            if (self.IN_MODEL=='MaxEnt'):
+                self.model = MaxEnt(X_pres=self.X_pres, X_bg=self.X_bg)
+                self.model.fit(maxiter=500, tol=1e-5)
+            elif (self.IN_MODEL=='RandomForest'):
+                self.model = RandomForestClassifier(
+                    n_estimators=500, n_jobs=-1, random_state=self.RANDOM_SEED, 
+                    class_weight="balanced_subsample", max_depth=10
+                )
+                self.model.fit(self.X, self.y) # Обучаем на X и y!
+            elif (self.IN_MODEL=='XGBoost'):
+                self.model = xgb.XGBClassifier(
+                    objective='binary:logistic', n_estimators=500, learning_rate=0.05, 
+                    max_depth=10, subsample=0.8, colsample_bytree=0.8, 
+                    random_state=self.RANDOM_SEED, n_jobs=-1, eval_metric='auc', tree_method='hist'
+                )
+                self.model.fit(self.X, self.y) # Обучаем на X и y!
+        except Exception as e:
+            print('Ошибка обучения финальной модели')
+            print(e)
+            save_error(self.ERROR_FILENAME, e)
+            return {'status': 'terminated', 'error': str(e), 'code': 401}
         
         # --- Важность переменных и Экологическая пластичность (Niche Breadth) ---
         # Наша новая версия MaxEnt теперь тоже поддерживает свойство feature_importances_
@@ -673,6 +723,64 @@ class PythonSDM:
         
         self.suitability = predict_suitability_for_stack(self.model, self.stack, self.valid_mask, batch_size=500_000)
         
+        # --- BAM-фреймворк: Применение M-фактора (мобильность с учетом рельефа) ---
+        if self.M_FACTOR_CUR != -1:
+            try:
+                print(f"Применяем фактор мобильности (M-фактор): {self.M_FACTOR_CUR} км...")
+                slope_data = None
+                if 'slope_deg' in self.band_names:
+                    slope_idx = self.band_names.index('slope_deg')
+                    slope_scaled = self.stack[slope_idx]
+                    # Выполняем обратное масштабирование, чтобы передать в FMM реальные градусы уклона
+                    slope_params = self.scales_config.get('slope_deg')
+                    slope_info = self.bio_info.get('slope_deg', {})
+                    slope_data = inverse_scale(slope_scaled, slope_params, slope_info)
+                    print("  Слой 'slope_deg' найден! Алгоритм будет учитывать рельеф при расчете доступности.")
+                else:
+                    print("  Слой 'slope_deg' не найден. Будет использовано стандартное евклидово расстояние.")
+                    
+                elev_data = None
+                if 'wc2.1_30s_elev' in self.band_names:
+                    elev_idx = self.band_names.index('wc2.1_30s_elev')
+                    elev_scaled = self.stack[elev_idx]
+                    elev_params = self.scales_config.get('wc2.1_30s_elev')
+                    elev_info = self.bio_info.get('wc2.1_30s_elev', {})
+                    elev_data = inverse_scale(elev_scaled, elev_params, elev_info)
+                    print("  Слой высоты найден! Горы будут физическим барьером.")
+                    
+                water_data = None
+                if 'Consensus_reduced_class_12' in self.band_names:
+                    water_idx = self.band_names.index('Consensus_reduced_class_12')
+                    water_scaled = self.stack[water_idx]
+                    water_params = self.scales_config.get('Consensus_reduced_class_12')
+                    water_info = self.bio_info.get('Consensus_reduced_class_12', {})
+                    water_data = inverse_scale(water_scaled, water_params, water_info)
+                    print("  Слой открытой воды найден! Моря станут преградой.")
+                    
+                is_bird = (self.dclass == ['Aves'])
+
+                # Генерируем матрицу множителей (0.0 ... 1.0)
+                m_factor_multiplier = apply_decay_to_points(
+                    raster_shape=(self.H, self.W),
+                    transform=self.transform,
+                    observation_rows=self.rows_p,
+                    observation_cols=self.cols_p,
+                    buffer_km=self.M_FACTOR_CUR,
+                    decay_type=self.M_FACTOR_DECAY_TYPE, # 'buffer' делает жесткую обрезку (1 внутри, 0 снаружи)
+                    slope_data=slope_data,
+                    elev_data=elev_data,
+                    water_data=water_data,
+                    is_bird=is_bird
+                )
+                
+                # Умножаем оригинальную пригодность (Абиотика) на M-фактор (Мобильность)
+                self.suitability = self.suitability * m_factor_multiplier
+            except Exception as e:
+                print(f"Ошибка применения фактора мобильности: {e}")
+        else:
+            print("Фактор мобильности (M-фактор) отключен пользователем (-1).")
+        # -------------------------------------------------------------------------
+        
         if (month!=0):
             self.OUTPUT_SUITABILITY_TIF = "output/suitability/"+str(self.IN_ID)+"/suitability_"+str(self.IN_ID)+"_"+str(month)+".tif"
             self.OUTPUT_SUITABILITY_JPG = "output/seasons/"+str(self.IN_ID)+"/cur_"+str(month)+".jpg"
@@ -684,20 +792,53 @@ class PythonSDM:
         save_geotiff(self.OUTPUT_SUITABILITY_TIF, self.suitability, self.profile)
         print(f"Карта пригодности сохранена: {self.OUTPUT_SUITABILITY_TIF}")
         
-        #try:
-        #    apply_decay_to_points(
-        #        input_tiff_path=self.OUTPUT_SUITABILITY_TIF,
-        #        observation_rows=self.rows_coord,
-        #        observation_cols=self.cols_coord,
-        #        buffer_km=self.M_FACTOR_CUR,
-        #        decay_type='buffer',
-        #        decay_rate=0.1 # Используем decay_rate как sigma
-        #    )
-        #except Exception as e:
-        #    print('Ошибка применения фактора мобильности')
-        #    print(str(e))
-        #    full_error_string = traceback.format_exc()
-        #    print(full_error_string)
+        # Сохраняем саму маску M-фактора отдельным файлом (для просмотра в QGIS)
+        if month == 0 and self.M_FACTOR_CUR != -1 and 'm_factor_multiplier' in locals():
+            try:
+                M_FACTOR_TIF = os.path.join(os.path.dirname(self.OUTPUT_SUITABILITY_TIF), f"m_factor_mask_{self.IN_ID}.tif")
+                
+                # --- Генерация комбинированной карты M-фактора для всех периодов ---
+                combined_m = np.zeros((self.H, self.W), dtype=np.float32)
+                
+                # Накладываем от большего к меньшему, чтобы перекрыть внутренние зоны. Значения: 4: 2100, 3: 2070, 2: 2040, 1: Текущий
+                if getattr(self, 'M_FACTOR_2100', -1) > 0:
+                    m2100 = apply_decay_to_points(
+                        raster_shape=(self.H, self.W), transform=self.transform, 
+                        observation_rows=self.rows_p, observation_cols=self.cols_p, 
+                        buffer_km=self.M_FACTOR_2100, decay_type=self.M_FACTOR_DECAY_TYPE, 
+                        slope_data=slope_data, elev_data=elev_data, water_data=water_data, is_bird=is_bird
+                    )
+                    combined_m[m2100 > 0] = 4
+                if getattr(self, 'M_FACTOR_2070', -1) > 0:
+                    m2070 = apply_decay_to_points(
+                        raster_shape=(self.H, self.W), transform=self.transform, 
+                        observation_rows=self.rows_p, observation_cols=self.cols_p, 
+                        buffer_km=self.M_FACTOR_2070, decay_type=self.M_FACTOR_DECAY_TYPE, 
+                        slope_data=slope_data, elev_data=elev_data, water_data=water_data, is_bird=is_bird
+                    )
+                    combined_m[m2070 > 0] = 3
+                if getattr(self, 'M_FACTOR_2040', -1) > 0:
+                    m2040 = apply_decay_to_points(
+                        raster_shape=(self.H, self.W), transform=self.transform, 
+                        observation_rows=self.rows_p, observation_cols=self.cols_p, 
+                        buffer_km=self.M_FACTOR_2040, decay_type=self.M_FACTOR_DECAY_TYPE, 
+                        slope_data=slope_data, elev_data=elev_data, water_data=water_data, is_bird=is_bird
+                    )
+                    combined_m[m2040 > 0] = 2
+                
+                # Поверх всего кладем текущий M-фактор (самый строгий)
+                combined_m[m_factor_multiplier > 0] = 1
+                
+                combined_m[combined_m == 0] = np.nan
+                save_geotiff(M_FACTOR_TIF, combined_m, self.profile)
+                
+                # Отрисовка JPEG карты M-фактора
+                M_FACTOR_JPG = os.path.join(os.path.dirname(self.OUTPUT_SUITABILITY_TIF), f"m_factor_map_{self.IN_ID}.jpg")
+                title_m = f"Зоны доступности вида (M-фактор) ({self.IN_ID})"
+                draw_m_factor_map(M_FACTOR_TIF, M_FACTOR_JPG, title_m, self.pres_lons, self.pres_lats, id=self.IN_ID)
+                print(f"Карта расширения M-фактора сохранена: {M_FACTOR_JPG}")
+                
+            except Exception: pass
         
         threshold_list = [0.05, 0.25, 0.5, 0.75, 0.95, self.optimal_threshold, self.optimal_threshold/2]
         self.gsq, self.gsc = get_geotiff_square(self.OUTPUT_SUITABILITY_TIF, threshold_list)
@@ -788,10 +929,10 @@ class PythonSDM:
         try:
             if self.n_presence>5:
                 #print('---Tif:'+self.OUTPUT_SUITABILITY_TIF)
-                draw_map(self.OUTPUT_SUITABILITY_TIF, self.OUTPUT_SUITABILITY_JPG, title, self.rows_coord, self.cols_coord, id=self.IN_ID)
+                draw_map(self.OUTPUT_SUITABILITY_TIF, self.OUTPUT_SUITABILITY_JPG, title, self.pres_lons, self.pres_lats, id=self.IN_ID)
             else:
                 #print('---Tif:'+self.OUTPUT_SUITABILITY_TIF_ORIG)
-                draw_map(self.OUTPUT_SUITABILITY_TIF_ORIG, self.OUTPUT_SUITABILITY_JPG, title, self.rows_coord, self.cols_coord, 1, id=self.IN_ID)
+                draw_map(self.OUTPUT_SUITABILITY_TIF_ORIG, self.OUTPUT_SUITABILITY_JPG, title, self.pres_lons, self.pres_lats, 1, id=self.IN_ID)
         except Exception as e:
             print('Ошибка рисования карты')
             print(str(e))
@@ -836,7 +977,7 @@ class PythonSDM:
             title = title + adt1 + adt2
                 
             OUTPUT_SUITABILITY_JPG = self.OUTPUT_FUTURE_DIR + "/1981-2010.jpg"
-            draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title, self.rows_coord, self.cols_coord, id=self.IN_ID)
+            draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title, self.pres_lons, self.pres_lats, id=self.IN_ID)
             print(f"Карта пригодности сохранена: {OUTPUT_SUITABILITY_JPG}")
             #os.remove(OUTPUT_SUITABILITY_TIF) # пока не удаляем tif для будущего
             
@@ -872,6 +1013,51 @@ class PythonSDM:
                         except Exception as e:
                             print('Ошибка прогноза будущего')
                             print(str(e))
+                            
+                        # --- BAM-фреймворк: Применение M-фактора для будущего ---
+                        future_m_factor = self.M_FACTOR_CUR
+                        if '2040' in period: future_m_factor = self.M_FACTOR_2040
+                        elif '2070' in period: future_m_factor = self.M_FACTOR_2070
+                        elif '2100' in period: future_m_factor = self.M_FACTOR_2100
+                        
+                        if future_m_factor != -1:
+                            slope_data_fut = None
+                            if 'slope_deg' in band_names_fut:
+                                slope_idx_fut = band_names_fut.index('slope_deg')
+                                slope_scaled_fut = stack_fut[slope_idx_fut]
+                                slope_params_fut = self.scales_config.get('slope_deg')
+                                slope_info_fut = self.bio_info.get('slope_deg', {})
+                                slope_data_fut = inverse_scale(slope_scaled_fut, slope_params_fut, slope_info_fut)
+                                
+                            elev_data_fut = None
+                            if 'wc2.1_30s_elev' in band_names_fut:
+                                elev_idx_fut = band_names_fut.index('wc2.1_30s_elev')
+                                elev_data_fut = inverse_scale(stack_fut[elev_idx_fut], self.scales_config.get('wc2.1_30s_elev'), self.bio_info.get('wc2.1_30s_elev', {}))
+                                
+                            water_data_fut = None
+                            if 'Consensus_reduced_class_12' in band_names_fut:
+                                water_idx_fut = band_names_fut.index('Consensus_reduced_class_12')
+                                water_data_fut = inverse_scale(stack_fut[water_idx_fut], self.scales_config.get('Consensus_reduced_class_12'), self.bio_info.get('Consensus_reduced_class_12', {}))
+                            
+                            try:
+                                m_factor_multiplier_fut = apply_decay_to_points(
+                                    raster_shape=(self.H, self.W),
+                                    transform=transform_fut,
+                                    observation_rows=self.rows_p,
+                                    observation_cols=self.cols_p,
+                                    buffer_km=future_m_factor,
+                                    decay_type=self.M_FACTOR_DECAY_TYPE,
+                                    slope_data=slope_data_fut,
+                                    elev_data=elev_data_fut,
+                                    water_data=water_data_fut,
+                                    is_bird=(self.dclass == ['Aves'])
+                                )
+                                suitability_f = suitability_f * m_factor_multiplier_fut
+                            except Exception as e:
+                                print(f"Ошибка применения фактора мобильности для будущего ({period}): {e}")
+                        else:
+                            print(f"Фактор мобильности для будущего ({period}) отключен (-1).")
+                        # --------------------------------------------------------
                         
                         out_name = f"{period}-{scenario}.tif"
                         out_path = os.path.join(self.OUTPUT_FUTURE_DIR, out_name)
@@ -911,13 +1097,14 @@ class PythonSDM:
                         adt2 = f"Sсубопт = "+str(gsq[6])+f" кв.км"
                         title = title + adt1 + adt2
                         
-                        draw_map(out_path, out_path_img, title, self.rows_coord, self.cols_coord, id=self.IN_ID)
+                        draw_map(out_path, out_path_img, title, self.pres_lons, self.pres_lats, id=self.IN_ID)
                         if scenario!='SSP370_EC-Earth3-Veg' and scenario!='ssp370':
                             os.remove(out_path) # пока не удаляем tif для будущего
             
             try:
+                clean_futures = clean_nans_for_json(future_stats)
                 with open(self.FUTURE_SUITS, 'a') as f:
-                    json.dump(future_stats, f, ensure_ascii=False, default=str)
+                    json.dump(clean_futures, f, ensure_ascii=False, default=str)
             except Exception as e:
                 print(str(e))
             
@@ -1030,5 +1217,3 @@ class PythonSDM:
                         
             
             print("-- Конец помесячного моделирования")
-
-
