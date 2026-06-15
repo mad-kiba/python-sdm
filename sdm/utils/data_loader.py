@@ -13,6 +13,7 @@ import shutil
 from scipy.ndimage import distance_transform_edt
 
 from .plots import plot_geotiff_with_osm
+from .utils import clean_nans_for_json
 
 
 # Основная функция загрузки, фильтрации и подготовки данных о встречаемости вида.
@@ -144,6 +145,7 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     print(f"-- 2.2. Группировка по месяцам ({IN_ID})")
     
     MONTH_COL = ''
+    counts_dict = {}
     if 'year' in df.columns:
         year_numeric = pd.to_numeric(df['year'], errors='coerce')
         df_coord_filtered = df[year_numeric > MINIMUM_YEAR_ALLOWED].copy()
@@ -161,7 +163,7 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
             monthly_counts = df_cleaned.groupby('year_month').size()
             counts_dict = monthly_counts.to_dict()
             with open(MONTH_FILENAME, 'w', encoding='utf-8') as f:
-                json.dump(counts_dict, f, ensure_ascii=False, indent=4) # indent=4 для читаемости
+                json.dump(clean_nans_for_json(counts_dict), f, ensure_ascii=False, indent=4) # indent=4 для читаемости
     else:
         df_coord_filtered = df
     
@@ -181,7 +183,10 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
         print('Less than 10 points')
         raise ValueError(f"Недостаточно точек. Должно быть не менее 10, сейчас: {len(occ)}.")
     
-    return {'LAT_COL': LAT_COL, 'LON_COL': LON_COL, 'df': df, 'occ': occ, 'status': 'done', 'species': species, 'kingdom': kingdom, 'dclass': dclass}
+    return {
+        'LAT_COL': LAT_COL, 'LON_COL': LON_COL, 'df': df, 'occ': occ, 'status': 'done', 
+        'species': species, 'kingdom': kingdom, 'dclass': dclass, 
+        'total_obs_in_csv': total_obs_in_csv, 'monthly_counts': counts_dict}
 
 
 # Вспомогательная функция для приведения имен координат к единому стандарту.

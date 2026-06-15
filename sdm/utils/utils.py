@@ -6,6 +6,7 @@ import numpy as np
 import rasterio
 import math
 import os
+import json
 import pyproj
 from rasterio.crs import CRS
 from rasterio.warp import calculate_default_transform, reproject, Resampling
@@ -150,6 +151,37 @@ def apply_decay_to_points(
     return multiplier
     
 
+def generate_combined_m_factor_map(
+    raster_shape, transform, observation_rows, observation_cols,
+    m_factors_dict, decay_type, slope_data, elev_data, water_data, is_bird,
+    current_multiplier, profile, output_tif_path
+):
+    """
+    Генерирует комбинированную карту M-фактора для нескольких временных периодов
+    и сохраняет её в GeoTIFF.
+    """
+    combined_m = np.zeros(raster_shape, dtype=np.float32)
+    
+    # Накладываем от большего к меньшему, чтобы перекрыть внутренние зоны.
+    # Ожидается словарь формата {4: M_FACTOR_2100, 3: M_FACTOR_2070, 2: M_FACTOR_2040}
+    for val, buffer_km in sorted(m_factors_dict.items(), reverse=True):
+        if buffer_km > 0:
+            m_mask = apply_decay_to_points(
+                raster_shape=raster_shape, transform=transform, 
+                observation_rows=observation_rows, observation_cols=observation_cols, 
+                buffer_km=buffer_km, decay_type=decay_type, 
+                slope_data=slope_data, elev_data=elev_data, water_data=water_data, is_bird=is_bird
+            )
+            combined_m[m_mask > 0] = val
+            
+    # Поверх всего кладем текущий M-фактор (самый строгий)
+    combined_m[current_multiplier > 0] = 1
+    
+    # Очищаем фон (заменяем нули на NoData)
+    combined_m[combined_m == 0] = np.nan
+    save_geotiff(output_tif_path, combined_m, profile)
+
+
 # Предсказывает пригодность местообитаний (suitability) для всего стека предикторов по батчам.
 def predict_suitability_for_stack(model, stack, valid_mask, batch_size=500_000):
     """
@@ -169,7 +201,7 @@ def predict_suitability_for_stack(model, stack, valid_mask, batch_size=500_000):
     """
     bands, H, W = stack.shape
     flat = stack.reshape(bands, -1).T  # (H*W, bands)
-    suitability_flat = np.full(H * W, np.nan, dtype="float32")
+    suitability_flat = np.full(H * W, np.nan, dtype="float32") 
     valid_idx = np.flatnonzero(valid_mask.ravel())
     for start in range(0, len(valid_idx), batch_size):
         end = start + batch_size
@@ -738,11 +770,18 @@ def clean_nans_for_json(obj):
     """
     if isinstance(obj, dict):
         return {k: clean_nans_for_json(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
+    elif isinstance(obj, (list, tuple)):
         return [clean_nans_for_json(v) for v in obj]
+    elif isinstance(obj, np.ndarray):
+        return [clean_nans_for_json(v) for v in obj.tolist()]
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
     elif isinstance(obj, (float, np.floating)):
         if np.isnan(obj) or np.isinf(obj):
             return None
+        return float(obj)
     return obj
 
 
@@ -978,3 +1017,16 @@ def continuous_boyce_index(obs, fit, num_bins=100, window_width=0.1):
         
     cbi, _ = spearmanr(bin_medians, f_ratios)
     return cbi
+
+
+# Сохранение данных модели в json-файл
+def save_json(data_dict, filepath):
+    """
+    Сохраняет словарь в формате JSON, предварительно очистив его от NaN/Infinity.
+    """
+    try:
+        cleaned_data = clean_nans_for_json(data_dict)
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(cleaned_data, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        print(f"Ошибка сохранения JSON: {e}")

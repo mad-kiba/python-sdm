@@ -49,10 +49,12 @@ sdm_instance.draw_gistos()              # 8) постройка гистогра
 sdm_instance.split_train_test()         # 9) разделение выборки на учебную и тестовую
 sdm_instance.train_model()              #10) обучение модели
 sdm_instance.predict_current()          #11) предсказание на текущем временном периоде
-#sdm_instance.calculate_moransi()
-sdm_instance.draw_map_current()         #12) отрисовка текущей карты
-sdm_instance.predict_future()           #13) предсказание на будущем временном периоде
-sdm_instance.predict_monthly()          #14) помесячная SDM
+sdm_instance.calculate_metrics()        #12) вычисление метрик
+sdm_instance.draw_map_current()         #13) рисование карты
+sdm_instance.predict_future()           #14) предсказание будущего
+#sdm_instance.predict_past()            #15) предсказание прошлого
+sdm_instance.predict_monthly()          #16) помесячные предсказания
+sdm_instance.set_done()                 #17) завершение модели
 
 print('Моделирование завершено')
 
