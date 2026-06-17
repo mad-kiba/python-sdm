@@ -30,7 +30,8 @@ def apply_decay_to_points(
     slope_data: np.ndarray = None,
     elev_data: np.ndarray = None,
     water_data: np.ndarray = None,
-    is_bird: bool = False
+    is_bird: bool = False,
+    height_barrier: float = 500,
 ):
     """
     Создает матрицу пространственного затухания (множителей от 0.0 до 1.0) 
@@ -90,8 +91,8 @@ def apply_decay_to_points(
                 pres_elevs = elev_data[observation_rows, observation_cols]
                 if len(pres_elevs) > 0:
                     # Допуск: вид может подняться на 500м из-за потепления, или спуститься на 500м
-                    max_elev = np.nanmax(pres_elevs) + 500.0
-                    min_elev = np.nanmin(pres_elevs) - 500.0
+                    max_elev = np.nanmax(pres_elevs) + height_barrier
+                    min_elev = np.nanmin(pres_elevs) - height_barrier
                     # Если пиксель выше/ниже предела, скорость падает в 20 раз (непроходимая зона)
                     speed[elev_data > max_elev] *= 0.05
                     speed[elev_data < min_elev] *= 0.05
@@ -101,7 +102,7 @@ def apply_decay_to_points(
                 # Если пиксель более чем на 50% состоит из открытой воды, животное не пройдет
                 speed[water_data > 50] *= 0.001
             
-            speed = np.maximum(speed, 0.001) # Абсолютная защита от деления на ноль
+            speed = np.maximum(speed, 0.001) # Защита от деления на ноль
             
             # Вычисляем Cost-Distance (Время в пути = эквивалент километров с учетом гор)
             tt = skfmm.travel_time(phi, speed, dx=pixel_size_km)
@@ -151,9 +152,10 @@ def apply_decay_to_points(
     return multiplier
     
 
+# Генерирует комбинированную карту M-фактора для нескольких временных периодов
 def generate_combined_m_factor_map(
     raster_shape, transform, observation_rows, observation_cols,
-    m_factors_dict, decay_type, slope_data, elev_data, water_data, is_bird,
+    m_factors_dict, decay_type, decay_rate, height_barrier, slope_data, elev_data, water_data, is_bird,
     current_multiplier, profile, output_tif_path
 ):
     """
@@ -169,7 +171,7 @@ def generate_combined_m_factor_map(
             m_mask = apply_decay_to_points(
                 raster_shape=raster_shape, transform=transform, 
                 observation_rows=observation_rows, observation_cols=observation_cols, 
-                buffer_km=buffer_km, decay_type=decay_type, 
+                buffer_km=buffer_km, decay_type=decay_type, decay_rate=decay_rate, height_barrier=height_barrier,
                 slope_data=slope_data, elev_data=elev_data, water_data=water_data, is_bird=is_bird
             )
             combined_m[m_mask > 0] = val

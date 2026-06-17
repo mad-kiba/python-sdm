@@ -38,9 +38,12 @@ class PythonSDM:
     # 0) Загрузка входных параметров
     def __init__(self, config): 
         
+        print('-- Входящие параметры:')
         for attribute_name, attribute_value in config.items(): # заполняем входящие параметры
             setattr(self, attribute_name, attribute_value)
-            
+            print(str(attribute_name) + ': ' + str(attribute_value)[:100])
+        
+        
             
         # для запуска в многопоточном режиме
         j = self.JOBS.get(self.IN_ID)
@@ -129,8 +132,10 @@ class PythonSDM:
         #self.MINIMUM_YEAR_ALLOWED = 1980
         self.MINIMUM_YEAR_ALLOWED = 2000
 
-        # какой метод затухания распространения вида использовать (M-фактор из BAM-фреймворка)
-        self.M_FACTOR_DECAY_TYPE = 'sigmoid'
+        # настройки М-фактора (куда вид может попасть)
+        #self.M_FACTOR_DECAY_TYPE = 'sigmoid'
+        #self.M_FACTOR_DECAY_RATE = 0.1
+        #self.M_FACTOR_HEIGHT_BARRIER = 500
 
         # начали
         self.RANDOM_SEED = 42
@@ -503,7 +508,9 @@ class PythonSDM:
                     'km2040': self.M_FACTOR_2040,
                     'km2070': self.M_FACTOR_2070,
                     'km2100': self.M_FACTOR_2100,
-                    'decay_type': getattr(self, 'M_FACTOR_DECAY_TYPE', 'buffer'),
+                    'decay_type': self.M_FACTOR_DECAY_TYPE,
+                    'barrier': self.M_FACTOR_HEIGHT_BARRIER,
+                    'speed': self.M_FACTOR_DECAY_RATE,
                     'is_bird': (['Aves'] == self.dclass)
                 }
                 self.MODEL_DATA['background_sampling'] = {
@@ -782,10 +789,12 @@ class PythonSDM:
                     observation_cols=self.cols_p,
                     buffer_km=self.M_FACTOR_CUR,
                     decay_type=self.M_FACTOR_DECAY_TYPE, 
+                    decay_rate=self.M_FACTOR_DECAY_RATE,
+                    height_barrier=self.M_FACTOR_HEIGHT_BARRIER,
                     slope_data=slope_data,
                     elev_data=elev_data,
                     water_data=water_data,
-                    is_bird=is_bird
+                    is_bird=is_bird,
                 )
                 
                 # Умножаем оригинальную пригодность (Абиотика) на M-фактор (Мобильность)
@@ -823,6 +832,7 @@ class PythonSDM:
                     raster_shape=(self.H, self.W), transform=self.transform,
                     observation_rows=self.rows_p, observation_cols=self.cols_p,
                     m_factors_dict=m_factors_dict, decay_type=self.M_FACTOR_DECAY_TYPE,
+                    decay_rate=self.M_FACTOR_DECAY_RATE, height_barrier=self.M_FACTOR_HEIGHT_BARRIER,
                     slope_data=slope_data, elev_data=elev_data, water_data=water_data, is_bird=is_bird,
                     current_multiplier=m_factor_multiplier, profile=self.profile, output_tif_path=M_FACTOR_TIF
                 )
@@ -1136,6 +1146,8 @@ class PythonSDM:
                                     observation_cols=self.cols_p,
                                     buffer_km=future_m_factor,
                                     decay_type=self.M_FACTOR_DECAY_TYPE,
+                                    decay_rate=self.M_FACTOR_DECAY_RATE,
+                                    height_barrier=self.M_FACTOR_HEIGHT_BARRIER,
                                     slope_data=slope_data_fut,
                                     elev_data=elev_data_fut,
                                     water_data=water_data_fut,
