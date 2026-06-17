@@ -18,7 +18,7 @@ from .utils import clean_nans_for_json
 
 # Основная функция загрузки, фильтрации и подготовки данных о встречаемости вида.
 def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME, CSV_FILENAME_ADD,
-                                CSV_FILTERED_FILENAME, MONTH_FILENAME, TEXT_FILENAME,
+                                CSV_FILTERED_FILENAME, MONTH_FILENAME,
                                 IN_MIN_LON, IN_MIN_LAT, IN_MAX_LON, IN_MAX_LAT, 
                                 ALLOWED_COORD_UNCERTAIN, MINIMUM_YEAR_ALLOWED):
     """
@@ -106,8 +106,6 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     
     # записываем в файл со статистикой общее число входных наблюдений до фильтрации
     total_obs_in_csv = len(df)
-    with open(TEXT_FILENAME, 'a') as f:
-        f.write(f"{total_obs_in_csv}")
     
     # вычисление полей с координатами
     LAT_COL = 'lat'
@@ -332,6 +330,9 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
     
     # Собираем файлы из подпапки динамичных подпапок
     dynamic_tifs = glob.glob(os.path.join(dynamic_subdir, "*.tif"))
+
+    # Получаем список среднегодовых предикторов для их исключения при помесячном прогнозе
+    dynamic_current_basenames = [os.path.basename(f) for f in glob.glob(os.path.join(raster_dir, "dynamic_current", "*.tif"))]
     
     # Объединяем оба списка
     all_available_tifs = []
@@ -361,6 +362,10 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
         # и сохраняем их в порядке, заданном в predictors
         
         for expected_filename in expected_full_filenames:
+            # Если это помесячное моделирование, игнорируем среднегодовые предикторы
+            if period == 'monthly' and expected_filename in dynamic_current_basenames:
+                continue
+                
             found = False
             # Ищем файл в уже собранном списке all_available_tifs
             for available_file_path in all_available_tifs:
@@ -376,10 +381,6 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
                     # Это делает загрузчик совместимым с UKESM1, GFDL-ESM4, IPSL и др.
                     subrep = re.sub(r'_[a-zA-Z0-9\-]+_ssp[0-9]{3}', '', subrep)
                     subrep = subrep.replace(interval.split('/')[0], base_period)
-                    #print('interval: '+interval.split('/')[0])
-                    #print('in:  '+os.path.basename(available_file_path))
-                    #print('rep: '+subrep)
-                    #print('exp: '+expected_filename)
                     
                     if subrep == expected_filename:
                         desired_tifs_ordered.append(available_file_path)
@@ -390,12 +391,13 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
                 
         if period == 'monthly': # добавим помесячные предикторы
             for path in dynamic_tifs:
-                desired_tifs_ordered.append(path)
+                if path not in desired_tifs_ordered:
+                    desired_tifs_ordered.append(path)
     
         
     tifs = desired_tifs_ordered
     
-    if False:
+    if len(not_found_tifs)>0:
         print('----------------')
         print('Доступные предикторы:')
         print(all_available_tifs)
@@ -406,9 +408,6 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
         print('Не найденные предикторы:')
         print(not_found_tifs)
         print('----------------')
-    if len(not_found_tifs)>0:
-        print('Не найденные предикторы:')
-        print(not_found_tifs)
     
     
     if not tifs:
@@ -441,7 +440,7 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
     for i, fp in enumerate(tifs):
         with rasterio.open(fp) as ds:
             arr = ds.read(1, masked=True)
-            arr = np.ma.filled(arr, np.nan).astype("float32") # Обязательно превращаем NoData в NaN
+            arr = np.ma.filled(arr.astype("float32"), np.nan) # Обязательно превращаем NoData в NaN
             if i == 0:
                 ref_transform = ds.transform
                 ref_width, ref_height = ds.width, ds.height
@@ -456,7 +455,7 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
             band_names.append(os.path.splitext(os.path.basename(fp))[0])
     
     stack = np.stack(band_arrays, axis=0)  # shape: (bands, H, W)
-
+    
     # Экстраполяция предикторов на водные пространства (Nearest Neighbor)
     print("Экстраполяция значений предикторов на акватории (Nearest Neighbor)...")
     MAX_EXTRAPOLATE_PIXELS = 50 # Лимит экстраполяции от берега (50 точек растра, т.е. примерно 50 км при step=30")
@@ -469,7 +468,7 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
             # Применяем экстраполяцию только к тем пикселям моря, которые близко к берегу
             close_enough = nan_mask & (distances <= MAX_EXTRAPOLATE_PIXELS)
             stack[i][close_enough] = stack[i][tuple(indices)][close_enough]
-
+    
     # Маска валидных пикселей: валиден, если нет NaN во всех слоях
     valid_mask = ~np.isnan(stack[0])
     # Теперь валидна не вся карта BBox, а только суша + 50 точек прибрежной зоны

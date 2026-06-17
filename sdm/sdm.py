@@ -28,7 +28,7 @@ from .utils.data_loader import load_species_occurrence_data, load_environmental_
 from .utils.utils import sample_background, extract_features_from_stack, inverse_scale, continuous_boyce_index
 from .utils.utils import save_geotiff, predict_suitability_for_stack, save_error, get_geotiff_square
 from .utils.utils import clean_nans_for_json, generate_combined_m_factor_map, save_json
-from .utils.utils import apply_decay_to_points, calculate_niche_breadth_pca 
+from .utils.utils import apply_decay_to_points, calculate_niche_breadth_pca, handle_model_error
 from .utils.plots import create_beautiful_histogram, draw_map, create_animated_gif, create_avi_from_images
 from .utils.plots import plot_roc_auc_curve, draw_m_factor_map
 from .utils.models import MaxEnt
@@ -48,7 +48,6 @@ class PythonSDM:
         if not j:
             self.JOBS[self.IN_ID] = {'status': 'queued', 'file': None, 'error': None}
         
-        self.TEXT_FILENAME = f"output/texts/{self.IN_ID}/{self.IN_ID}.txt"
         self.JSON_FILENAME = f"output/texts/{self.IN_ID}/{self.IN_ID}.json"
 
         # если нулевые параметры - это запрос на данные из старого расчёта
@@ -137,7 +136,6 @@ class PythonSDM:
         self.RANDOM_SEED = 42
         np.random.seed(self.RANDOM_SEED)
         
-        self.PRED_FILENAME = f"output/texts/{self.IN_ID}/{self.IN_ID}_pred.txt"
         self.MONTH_FILENAME = f"output/texts/{self.IN_ID}/{self.IN_ID}_month.txt"
         self.CSV_FILENAME = f"output/texts/{self.IN_ID}/{self.IN_ID}.csv"
         self.CSV_FILENAME_ADD = f"output/texts/{self.IN_ID}/{self.IN_ID}_add.csv"
@@ -186,13 +184,7 @@ class PythonSDM:
             clip_rasters(self.RAW_RASTER_DIR, self.OUTPUT_RASTER_DIR, self.IN_MIN_LAT, self.IN_MIN_LON,
                          self.IN_MAX_LAT, self.IN_MAX_LON, self.MODEL_FUTURE, self.MODEL_PAST, self.MODEL_SEASON, self.IN_RESOLUTION)
         except Exception as e:
-            print('Ошибка подготовки предикторов:')
-            print(e)
-            save_error(self.ERROR_FILENAME, e)
-            self.MODEL_DATA['status'] = 'error'
-            self.MODEL_DATA['error'] = str(e)
-            save_json(self.MODEL_DATA, self.JSON_FILENAME)
-            return {'status': 'terminated', 'error': str(e), 'code': 401}
+            return handle_model_error(e, self.ERROR_FILENAME, self.MODEL_DATA, self.JSON_FILENAME, 'Ошибка подготовки предикторов:')
         
     
     # 2) Загрузка присутствий
@@ -201,18 +193,12 @@ class PythonSDM:
         
         try:
             ret = load_species_occurrence_data(self.IN_ID, self.IN_CSV, self.IN_CSV_ADDITIONAL,
-                                               self.CSV_FILENAME, self.CSV_FILENAME_ADD, self.CSV_FILTERED_FILENAME,
-                                               self.MONTH_FILENAME, self.TEXT_FILENAME,
+                                               self.CSV_FILENAME, self.CSV_FILENAME_ADD, 
+                                               self.CSV_FILTERED_FILENAME, self.MONTH_FILENAME,
                                                self.IN_MIN_LON, self.IN_MIN_LAT, self.IN_MAX_LON, self.IN_MAX_LAT,
                                                self.ALLOWED_COORD_UNCERTAIN, self.MINIMUM_YEAR_ALLOWED)
         except Exception as e:
-            # если не будут возвращаться тексты ошибок исключений, раскомментировать две строчки ниже:
-            print(e)
-            save_error(self.ERROR_FILENAME, e)
-            self.MODEL_DATA['status'] = 'error'
-            self.MODEL_DATA['error'] = str(e)
-            save_json(self.MODEL_DATA, self.JSON_FILENAME)
-            return {'status': 'terminated', 'error': str(e), 'code': 401}
+            return handle_model_error(e, self.ERROR_FILENAME, self.MODEL_DATA, self.JSON_FILENAME, 'Ошибка обработки csv:')
         
         self.LAT_COL = ret['LAT_COL']
         self.LON_COL = ret['LON_COL']
@@ -260,29 +246,20 @@ class PythonSDM:
             
             self.bands, self.H, self.W = self.stack.shape
         except Exception as e:
-            print(e)
-            save_error(self.ERROR_FILENAME, e)
-            self.MODEL_DATA['status'] = 'error'
-            self.MODEL_DATA['error'] = str(e)
-            save_json(self.MODEL_DATA, self.JSON_FILENAME)
-            return {'status': 'terminated', 'error': str(e), 'code': 401}
+            return handle_model_error(e, self.ERROR_FILENAME, self.MODEL_DATA, self.JSON_FILENAME, 'Ошибка загрузки предикторов:')
         
         print(f"\n-- Загружено предикторов: {self.bands} | Размер: {self.H} x {self.W} | CRS: {self.crs}")
         print("Слои:", self.band_names)
         
         if period == 'current':
-            with open(self.TEXT_FILENAME, 'a') as f:
-                f.write(f"\n{self.bands} | Размер: {self.H} x {self.W} | CRS: {self.crs}")
-                f.write(f"\n{self.band_names}")
-
-                self.MODEL_DATA['predictors'] = {
-                    'bands_count': self.bands,
-                    'height': self.H,
-                    'width': self.W,
-                    'crs': str(self.crs),
-                    'band_names': self.band_names
-                }
-                save_json(self.MODEL_DATA, self.JSON_FILENAME)
+            self.MODEL_DATA['predictors'] = {
+                'bands_count': self.bands,
+                'height': self.H,
+                'width': self.W,
+                'crs': str(self.crs),
+                'band_names': self.band_names
+            }
+            save_json(self.MODEL_DATA, self.JSON_FILENAME)
     
     
     # 4) Привязка присутствий к пикселям растра и фильтрация по маске валидности
@@ -308,22 +285,14 @@ class PythonSDM:
         print(f"Присутствий внутри валидной области: {len(rows)}")
         
         if month==0:
-            with open(self.TEXT_FILENAME, 'a') as f:
-                f.write(f"\n{len(rows)}")
-
             if 'occurrences' not in self.MODEL_DATA:
                 self.MODEL_DATA['occurrences'] = {}
             self.MODEL_DATA['occurrences']['points_inside_valid_area'] = len(rows)
             save_json(self.MODEL_DATA, self.JSON_FILENAME)
         
         if len(rows)<10 and month==0:
-            print('Not enough points in region')
             err_msg = f"Внутри области моделирования недостаточно точек. Должно быть не менее 10, сейчас: {len(rows)}."
-            save_error(self.ERROR_FILENAME, err_msg)
-            self.MODEL_DATA['status'] = 'error'
-            self.MODEL_DATA['error'] = err_msg
-            save_json(self.MODEL_DATA, self.JSON_FILENAME)
-            return {'status': 'terminated', 'error': err_msg, 'code': 401}
+            return handle_model_error(err_msg, self.ERROR_FILENAME, self.MODEL_DATA, self.JSON_FILENAME, 'Not enough points in region')
         
         # 4.1) создаём полные растры для всего спектра слоёв-предикторов
         print(f"-- 4.1. Создаём полные растры для всего спектра слоёв-предикторов ({self.IN_ID})")
@@ -354,20 +323,12 @@ class PythonSDM:
 
         
         if n_presence<5 and month==0:
-            print('Not enough unique points in region')
             err_msg = f"Внутри области моделирования очень мало уникальных присутствий. Должно быть не менее 5, сейчас: {n_presence}."
-            save_error(self.ERROR_FILENAME, err_msg)
-            self.MODEL_DATA['status'] = 'error'
-            self.MODEL_DATA['error'] = err_msg
-            save_json(self.MODEL_DATA, self.JSON_FILENAME)
-            return {'status': 'terminated', 'error': err_msg, 'code': 401}
+            return handle_model_error(err_msg, self.ERROR_FILENAME, self.MODEL_DATA, self.JSON_FILENAME, 'Not enough unique points in region')
         
         self.pres_lons, self.pres_lats, inside = pixel_indices_to_points(rows_p, cols_p, self.transform, self.W, self.H)
         
         if month==0:
-            with open(self.TEXT_FILENAME, 'a') as f:
-                f.write(f"\n{n_presence}")
-
             if 'occurrences' not in self.MODEL_DATA:
                 self.MODEL_DATA['occurrences'] = {}
             self.MODEL_DATA['occurrences']['unique_points'] = n_presence
@@ -520,12 +481,7 @@ class PythonSDM:
                 self.BG_PC = 100
             else:
                 self.BG_ABS_PC = 100 - self.BG_PC
-            
-            if month==0:
-                with open(self.TEXT_FILENAME, 'a') as f:
-                    f.write(f"\n{self.BG_PC},{self.BG_ABS_PC},{self.BG_DISTANCE_MIN},{self.BG_DISTANCE_MAX},{self.BG_MULT}")
-                    f.write(f"\n{self.IN_MIN_LON},{self.IN_MIN_LAT},{self.IN_MAX_LON},{self.IN_MAX_LAT},{self.IN_RESOLUTION},{self.IN_MODEL}")
-                    
+             
             rng = np.random.default_rng(self.RANDOM_SEED)
             
             if self.IN_MODEL == 'MaxEnt':
@@ -539,15 +495,14 @@ class PythonSDM:
             
             self.rows_bg, self.cols_bg, self.rows_random, self.cols_random, self.rows_buffer, self.cols_buffer = sample_background(self.valid_mask,
                                                            set(map(tuple, self.pres_rc)), n_bg,
-                                                           rng, self.BG_PC, self.BG_DISTANCE_MIN, self.BG_DISTANCE_MAX,
-                                                           self.TEXT_FILENAME, month)
+                                                           rng, self.BG_PC, self.BG_DISTANCE_MIN, self.BG_DISTANCE_MAX)
 
             if month == 0:
                 self.MODEL_DATA['mobility_factors'] = {
                     'current_km': self.M_FACTOR_CUR,
-                    '2040_km': self.M_FACTOR_2040,
-                    '2070_km': self.M_FACTOR_2070,
-                    '2100_km': self.M_FACTOR_2100,
+                    'km2040': self.M_FACTOR_2040,
+                    'km2070': self.M_FACTOR_2070,
+                    'km2100': self.M_FACTOR_2100,
                     'decay_type': getattr(self, 'M_FACTOR_DECAY_TYPE', 'buffer'),
                     'is_bird': (['Aves'] == self.dclass)
                 }
@@ -663,7 +618,7 @@ class PythonSDM:
                 
                 # Сохраняем фигуру (оптимизировано: без bbox_inches='tight' и с dpi=100)
                 fig_single.tight_layout()
-                plt.savefig(output_filename, dpi=100) 
+                plt.savefig(output_filename, dpi=150) 
                 print(f"Сохранена гистограмма: {i} - {output_filename}")
                 
             plt.close(fig_single) # Закрываем один раз после завершения всех предикторов
@@ -745,13 +700,7 @@ class PythonSDM:
             else:
                 raise ValueError(f"Неизвестный или неподдерживаемый тип алгоритма: '{self.IN_MODEL}'")
         except Exception as e:
-            print('Ошибка обучения валидационной модели')
-            print(str(e))
-            save_error(self.ERROR_FILENAME, e)
-            self.MODEL_DATA['status'] = 'error'
-            self.MODEL_DATA['error'] = str(e)
-            save_json(self.MODEL_DATA, self.JSON_FILENAME)
-            return {'status': 'terminated', 'error': str(e), 'code': 401}
+            return handle_model_error(e, self.ERROR_FILENAME, self.MODEL_DATA, self.JSON_FILENAME, 'Ошибка обучения валидационной модели')
             
         print('Обучение валидационной модели завершено')
         
@@ -781,13 +730,7 @@ class PythonSDM:
             else:
                 raise ValueError(f"Неизвестный или неподдерживаемый тип алгоритма: '{self.IN_MODEL}'")
         except Exception as e:
-            print('Ошибка обучения финальной модели')
-            print(e)
-            save_error(self.ERROR_FILENAME, e)
-            self.MODEL_DATA['status'] = 'error'
-            self.MODEL_DATA['error'] = str(e)
-            save_json(self.MODEL_DATA, self.JSON_FILENAME)
-            return {'status': 'terminated', 'error': str(e), 'code': 401}
+            return handle_model_error(e, self.ERROR_FILENAME, self.MODEL_DATA, self.JSON_FILENAME, 'Ошибка обучения финальной модели')
 
 
     # 11) Прогноз на всю область и сохранение карты пригодности
@@ -1004,16 +947,6 @@ class PythonSDM:
         
         # Если это основной прогон - записываем метрики качества в файл
         if month==0:
-            with open(self.TEXT_FILENAME, 'a') as f:
-                f.write(f"\n{self.auc:.3f},{self.tss:.3f},{self.kappa:.3f},{self.TN:.3f},{self.FP:.3f},{self.TP:.3f},{self.FN:.3f},{self.optimal_threshold:.3f},")
-                f.write(f"{self.sensitivity:.3f},{self.specificity:.3f},{self.fdr:.3f},{self.for_rate:.3f},{self.ppv:.3f},{self.npv:.3f},")
-                f.write(f"{self.bias_score:.3f},{self.csi:.3f},{self.accuracy:.3f},{self.misclassification_rate:.3f},{self.boyce_index:.3f},{self.pca_breadth:.4f}")
-                
-                if self.species!='':
-                    f.write(f"\n{self.species}")
-                else:
-                    f.write(f"\nне определён")
-                
             self.MODEL_DATA['metrics'] = {
                 'auc': float(self.auc),
                 'tss': float(self.tss),
@@ -1040,8 +973,6 @@ class PythonSDM:
             for name, imp in sorted(zip(self.band_names, importances), key=lambda x: -x[1]):
                 print(f"  {name:30s} {imp:.4f}")
                 feature_importances_dict[name] = float(imp)
-                with open(self.PRED_FILENAME, 'a') as f:
-                    f.write(f"\n_{name:30s}:{imp:.4f}")
             
             self.MODEL_DATA['feature_importances'] = feature_importances_dict
             save_json(self.MODEL_DATA, self.JSON_FILENAME)
@@ -1050,22 +981,6 @@ class PythonSDM:
         self.gsq, self.gsc = get_geotiff_square(self.OUTPUT_SUITABILITY_TIF, threshold_list)
         
         if month==0:
-            with open(self.TEXT_FILENAME, 'a') as f:
-                f.write(f"\nSHSLOW:{self.gsq[6]}")
-                f.write(f"\nSHSOPT:{self.gsq[5]}")
-                f.write(f"\nSHS05:{self.gsq[0]}")
-                f.write(f"\nSHS25:{self.gsq[1]}")
-                f.write(f"\nSHS50:{self.gsq[2]}")
-                f.write(f"\nSHS75:{self.gsq[3]}")
-                f.write(f"\nSHS95:{self.gsq[4]}")
-                f.write(f"\nCHSLOW:{self.gsc[6]}")
-                f.write(f"\nCHSOPT:{self.gsc[5]}")
-                f.write(f"\nCHS05:{self.gsc[0]}")
-                f.write(f"\nCHS25:{self.gsc[1]}")
-                f.write(f"\nCHS50:{self.gsc[2]}")
-                f.write(f"\nCHS75:{self.gsc[3]}")
-                f.write(f"\nCHS95:{self.gsc[4]}")
-
             self.MODEL_DATA['area_metrics'] = {
                 'square_km': {
                     'threshold_05': self.gsq[0],
@@ -1322,9 +1237,6 @@ class PythonSDM:
                 for month in range(1, 13):
                     print(f"\n---- Прогноз для месяца {month}")
                     
-                    MONTHLY_ROOT_DIR = os.path.join(self.OUTPUT_RASTER_DIR, 'dynamic_monthly')   # где лежат папки месяцев 1, 2, ...
-                    period_dir = os.path.join(MONTHLY_ROOT_DIR, str(month))
-                    
                     self.load_predictors('monthly', month)
                     self.prepare_data(month)
                     self.deduplicate_data(month)
@@ -1338,12 +1250,7 @@ class PythonSDM:
                     self.OUTPUT_SUITABILITY_JPG = "output/seasons/"+str(self.IN_ID)+"/cur_"+str(self.IN_ID)+"_"+str(month)+".jpg"
                     self.draw_map_current(month)
             except Exception as e:
-                print(e)
-                save_error(self.ERROR_FILENAME, e)
-                self.MODEL_DATA['status'] = 'error'
-                self.MODEL_DATA['error'] = str(e)
-                save_json(self.MODEL_DATA, self.JSON_FILENAME)
-                return {'status': 'terminated', 'error': str(e), 'code': 401}
+                return handle_model_error(e, self.ERROR_FILENAME, self.MODEL_DATA, self.JSON_FILENAME, 'Ошибка помесячного моделирования:')
             
             
             # 16.1) Анимация сезонности
@@ -1378,6 +1285,7 @@ class PythonSDM:
             
             print("-- Конец помесячного моделирования")
     
+
     # 17) Отмечает процесс как успешно завершённый в JSON
     def set_done(self):
         """Отмечает процесс как успешно завершённый в JSON."""

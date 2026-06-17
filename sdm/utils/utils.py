@@ -595,6 +595,23 @@ def save_error(error_path, text):
         f.write(str(text))
 
 
+# Логирование ошибок
+def handle_model_error(error_obj, error_filename, model_data, json_filename, context_msg=None):
+    """
+    Обрабатывает ошибку моделирования: выводит в консоль, сохраняет в файл лога,
+    обновляет статус в JSON словаре и возвращает словарь для прерывания пайплайна.
+    """
+    if context_msg:
+        print(context_msg)
+    print(str(error_obj))
+    save_error(error_filename, error_obj)
+    if model_data is not None:
+        model_data['status'] = 'error'
+        model_data['error'] = str(error_obj)
+        save_json(model_data, json_filename)
+    return {'status': 'terminated', 'error': str(error_obj), 'code': 401}
+
+
 # Вычисляет физическую площадь (в кв. км) и количество пикселей, превышающих заданные пороги вероятности.
 def get_geotiff_square(filepath: str, threshold) -> dict:
     """
@@ -805,7 +822,7 @@ def extract_features_from_stack(stack, rows, cols):
 
 # Сэмплирует n_bg фоновых пикселей, разделяя их на две части
 def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
-                      distance_min_pixels = 1, distance_max_pixels = 1, text_filename = '', month = 0):
+                      distance_min_pixels = 1, distance_max_pixels = 1):
     """
     Сэмплирует n_bg фоновых пикселей, разделяя их на две части:
     1. 50% точек - случайно в пределах valid_mask (исключая точки присутствия).
@@ -863,9 +880,6 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
 
     # если не требуется брать точки с границ
     if bg_pc == 100:
-        if month == 0:
-            with open(text_filename, 'a') as f:
-                f.write(f"\n{len(rows_random)},0")
         return rows_random, cols_random, rows_random, cols_random, [], []
     
     # --- Часть 2: Фон в "огибающей" (буфере) ---
@@ -876,17 +890,11 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
     
     if n_bg_buffer_target <= 0:
         # Если уже набрали достаточно случайных точек, возвращаем их
-        if month == 0:
-            with open(text_filename, 'a') as f:
-                f.write(f"\n{len(rows_random)},0")
         return rows_random, cols_random, rows_random, cols_random, [], []
     
     # Если точек присутствия нет, буферная часть не может быть сгенерирована
     if not presence_rc_set:
         print("ВНИМАНИЕ: Отсутствуют точки присутствия для генерации фона в огибающей.")
-        if month == 0:
-            with open(text_filename, 'a') as f:
-                f.write(f"\n{len(rows_random)},0")
         return rows_random, cols_random, rows_random, cols_random, [], []
     
     # 1. Создаем массив расстояний до ближайшей точки присутствия
@@ -956,10 +964,6 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
         indices = rng.permutation(len(all_rows))
         all_rows = all_rows[indices]
         all_cols = all_cols[indices]
-    
-    if month == 0:
-        with open(text_filename, 'a') as f:
-            f.write(f"\n{len(rows_random)},{len(rows_buffer)}")
     
     return all_rows, all_cols, rows_random, cols_random, rows_buffer, cols_buffer
 
