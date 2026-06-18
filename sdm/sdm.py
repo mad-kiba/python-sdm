@@ -4,6 +4,7 @@
 # Библиотека PythonSDM для моделирования распространения видов
 
 import os
+import re
 import traceback
 import json
 import math
@@ -241,10 +242,10 @@ class PythonSDM:
                 print('Файл масштабов не найден')
             
             if period == 'current':
-                self.stack, self.valid_mask, self.transform, self.crs, self.profile, self.band_names, self.band_paths = \
+                self.stack, self.valid_mask, self.transform, self.crs, self.profile, self.band_names, self.band_paths, self.glacier_mask = \
                     load_environmental_predictors(self.RASTER_DIR, self.PREDICTORS, scales = self.scales_config, bio_info = self.bio_info)
             elif period == 'monthly':
-                self.stack, self.valid_mask, self.transform, self.crs, self.profile, self.band_names, self.band_paths = \
+                self.stack, self.valid_mask, self.transform, self.crs, self.profile, self.band_names, self.band_paths, self.glacier_mask = \
                     load_environmental_predictors(self.RASTER_DIR, self.PREDICTORS, period = 'monthly', interval = month, bio_info = self.bio_info)
             else:
                 raise ValueError(f"Неподдерживаемый период загрузки предикторов: {period}")
@@ -745,9 +746,16 @@ class PythonSDM:
         print(f"\n-- 11. Прогноз на всю область и сохранение карты пригодности ({self.IN_ID})")
         
         self.suitability = predict_suitability_for_stack(self.model, self.stack, self.valid_mask, batch_size=500_000)
+
+        # Зона ледников полностью непригодна для жизни
+        if hasattr(self, 'glacier_mask') and self.glacier_mask is not None:
+            self.suitability[self.glacier_mask & self.valid_mask] = 0.0
+
+        self.suitability = predict_suitability_for_stack(self.model, self.stack, self.valid_mask, batch_size=500_000)
         
         # --- BAM-фреймворк: Применение M-фактора (мобильность с учетом рельефа) ---
         if self.M_FACTOR_CUR != -1:
+            m_factor_multiplier = np.ones_like(self.suitability) # Инициализация по умолчанию
             try:
                 print(f"Применяем фактор мобильности (M-фактор): {self.M_FACTOR_CUR} км...")
                 slope_data = None
@@ -1103,12 +1111,14 @@ class PythonSDM:
                         print(f"\nПрогноз: {period} / {scenario}")
                         
                         # Загружаем будущие предикторы строго в порядке self.PREDICTORS;
-                        stack_fut, valid_mask_fut, transform_fut, crs_fut, profile_fut, band_names_fut, band_paths = \
+                        stack_fut, valid_mask_fut, transform_fut, crs_fut, profile_fut, band_names_fut, band_paths, glacier_mask_fut = \
                             load_environmental_predictors(self.RASTER_DIR, self.PREDICTORS, 'future', scen_dir, '', self.bio_info)
                         
                         # делаем прогноз для будущего с той же моделью, с которой делали текущее
                         try:
                             suitability_f = predict_suitability_for_stack(self.model, stack_fut, valid_mask_fut, batch_size=500_000)
+                            if glacier_mask_fut is not None:
+                                suitability_f[glacier_mask_fut & valid_mask_fut] = 0.0
                         except Exception as e:
                             print('Ошибка прогноза будущего')
                             print(str(e))
@@ -1231,11 +1241,230 @@ class PythonSDM:
     # 15) Прогноз распространения вида в прошлом
     def predict_past(self): 
         if self.MODEL_PAST==1 and self.IN_MODEL!='MaxEnt':
-            print(f"\n-- 14. Приступаю к прогнозу прошлого ({self.IN_ID})")
+            print(f"\n-- 15. Приступаю к прогнозу прошлого ({self.IN_ID})")
+            
             # Пути
-            PAST_ROOT_DIR = os.path.join(self.OUTPUT_RASTER_DIR, 'dynamic_past')   # где лежат папки периодов 2021-2040, ...
+            PAST_ROOT_DIR = os.path.join(self.OUTPUT_RASTER_DIR, 'dynamic_past')
             
             os.makedirs(self.OUTPUT_PAST_DIR, exist_ok=True)
+
+
+            if not os.path.exists(PAST_ROOT_DIR):
+                print(f"Папка {PAST_ROOT_DIR} не найдена. Пропуск.")
+                return
+                
+            past_stats = {}
+            self.past_imgs = []
+
+            # --- ОБУЧЕНИЕ СПЕЦИАЛЬНОЙ МОДЕЛИ ДЛЯ ПРОШЛОГО ---
+            print(f"\nОбучение базовой модели для прошлого (на предикторах learning)...")
+            try:
+                # 1. Загрузка стека для обучения (dynamic_past/learning)
+                stack_past_learn, valid_mask_past_learn, _, _, _, band_names_past_learn, _, _ = \
+                    load_environmental_predictors(self.RASTER_DIR, self.PREDICTORS, 'past', 'learning', '', self.bio_info)
+
+                # 2. Привязка точек и фильтрация по маске прошлого
+                valid_p_mask = valid_mask_past_learn[self.rows_p, self.cols_p]
+                rows_p_learn = self.rows_p[valid_p_mask]
+                cols_p_learn = self.cols_p[valid_p_mask]
+
+                valid_bg_mask = valid_mask_past_learn[self.rows_bg, self.cols_bg]
+                rows_bg_learn = self.rows_bg[valid_bg_mask]
+                cols_bg_learn = self.cols_bg[valid_bg_mask]
+
+                # 3. Извлечение признаков
+                X_pres_learn = extract_features_from_stack(stack_past_learn, rows_p_learn, cols_p_learn)
+                X_bg_learn = extract_features_from_stack(stack_past_learn, rows_bg_learn, cols_bg_learn)
+                X_learn = np.vstack([X_pres_learn, X_bg_learn])
+                y_learn = np.hstack([np.ones(len(X_pres_learn), dtype=int), np.zeros(len(X_bg_learn), dtype=int)])
+
+                # Защита от NaN
+                valid_rows_mask = ~np.isnan(X_learn).any(axis=1)
+                X_learn = X_learn[valid_rows_mask]
+                y_learn = y_learn[valid_rows_mask]
+
+                if len(X_learn) == 0 or np.sum(y_learn == 1) == 0:
+                    raise ValueError("Обучающая выборка пуста. Точки присутствия не попали в валидные области предикторов 'learning'. "
+                                     "Возможно, несовпадение масок суши или отсутствие точек в этом периоде.")
+                
+                print(f"Матрица признаков для прошлого: {X_learn.shape}, классы: {np.bincount(y_learn)}")
+
+                # 4. Обучение отдельной модели
+                if self.IN_MODEL == 'MaxEnt':
+                    past_model = MaxEnt(X_pres=X_learn[y_learn == 1], X_bg=X_learn[y_learn == 0])
+                    past_model.fit(maxiter=500, tol=1e-5)
+                elif self.IN_MODEL == 'RandomForest':
+                    rf_min_leaf = 5 if len(rows_p_learn) > 500 else (3 if len(rows_p_learn) > 300 else 1)
+                    past_model = RandomForestClassifier(n_estimators=500, n_jobs=-1, random_state=self.RANDOM_SEED, class_weight="balanced_subsample", max_depth=10, min_samples_leaf=rf_min_leaf)
+                    past_model.fit(X_learn, y_learn)
+                elif self.IN_MODEL == 'XGBoost':
+                    spw_final = np.sum(y_learn == 0) / max(1, np.sum(y_learn == 1))
+                    past_model = xgb.XGBClassifier(objective='binary:logistic', n_estimators=500, learning_rate=0.05, max_depth=5, subsample=0.8, colsample_bytree=0.8, scale_pos_weight=spw_final, random_state=self.RANDOM_SEED, n_jobs=-1, eval_metric='auc', tree_method='hist')
+                    past_model.fit(X_learn, y_learn)
+                else:
+                    raise ValueError(f"Неизвестный тип алгоритма: '{self.IN_MODEL}'")
+                
+            except Exception as e:
+                return handle_model_error(e, self.ERROR_FILENAME, self.MODEL_DATA, self.JSON_FILENAME, 'Ошибка обучения модели прошлого:')
+            
+            try:
+                # Нормализатор имен для сравнения (удаляет индексы тысячелетий из названия CHELSA TraCE21k, например _0021_)
+                def normalize_trace_name(name):
+                    # e.g., CHELSA_TraCE21k_bio12_0021_V.1.0 -> CHELSA_TraCE21k_bio12_V.1.0
+                    # e.g., CHELSA_TraCE21k_bio12_-010_V.1.0 -> CHELSA_TraCE21k_bio12_V.1.0
+                    parts = name.split('_')
+                    new_parts = []
+                    for part in parts:
+                        try:
+                            int(part) # Проверяем, является ли часть строки числом (напр. '0021' или '-010')
+                        except ValueError:
+                            new_parts.append(part) # Если не число, сохраняем
+                    return '_'.join(new_parts)
+                    
+                learn_vars = [normalize_trace_name(n) for n in band_names_past_learn]
+            except Exception as e:
+                return handle_model_error(e, self.ERROR_FILENAME, self.MODEL_DATA, self.JSON_FILENAME, 'Ошибка нормализации имён файлов:')
+            
+
+            # Сортируем папки лексикографически ('01-200', '02-180', ..., '38-020'), 
+            # что обеспечивает идеальный хронологический порядок для анимации
+            past_folders = sorted(d for d in os.listdir(PAST_ROOT_DIR) if os.path.isdir(os.path.join(PAST_ROOT_DIR, d)) and d != 'learning')
+            past_folders.append('learning') # Добавляем 'learning' в конец как отражение современности
+            total_past = len(past_folders)
+            
+            for idx, period_past in enumerate(past_folders):
+                print(f"\nПрогноз для прошлого: {period_past}")
+                
+                try:
+                    # Загружаем предикторы для прошлого
+                    stack_past, valid_mask_past, transform_past, crs_past, profile_past, band_names_past, band_paths, glacier_mask_past = \
+                        load_environmental_predictors(self.RASTER_DIR, self.PREDICTORS, 'past', period_past, '', self.bio_info)
+                    
+                    # Сверяем, все ли предикторы на месте
+                    pred_vars = [normalize_trace_name(n) for n in band_names_past]
+                    if set(learn_vars) != set(pred_vars):
+                        # Фатальная ошибка: наборы файлов не совпадают
+                        missing_in_pred = set(learn_vars) - set(pred_vars)
+                        missing_in_learn = set(pred_vars) - set(learn_vars)
+                        err_msg = f"Несовпадение предикторов в папке {period_past}."
+                        if missing_in_pred: err_msg += f" Отсутствуют слои: {', '.join(missing_in_pred)}."
+                        if missing_in_learn: err_msg += f" Лишние слои: {', '.join(missing_in_learn)}."
+                        raise ValueError(err_msg)
+                    elif learn_vars != pred_vars:
+                        # Наборы одинаковые, но порядок разный. Автоматически переупорядочиваем стек!
+                        print(f"  Порядок предикторов в {period_past} отличается. Выполняется автоматическая пересортировка...")
+                        reorder_indices = [pred_vars.index(var) for var in learn_vars]
+                        stack_past = stack_past[reorder_indices]
+                        band_names_past = [band_names_past[i] for i in reorder_indices]
+                        if band_paths:
+                            band_paths = [band_paths[i] for i in reorder_indices]
+                    
+                    
+                    # Прогноз
+                    suitability_p = predict_suitability_for_stack(past_model, stack_past, valid_mask_past, batch_size=500_000)
+                    
+                    if glacier_mask_past is not None:
+                        suitability_p[glacier_mask_past & valid_mask_past] = 0.0
+                    
+                    # --- BAM-фреймворк: Применение M-фактора для прошлого ---
+                    if self.M_FACTOR_CUR != -1:
+                        slope_data_past = None
+                        if 'slope_deg' in band_names_past:
+                            slope_idx_past = band_names_past.index('slope_deg')
+                            slope_scaled_past = stack_past[slope_idx_past]
+                            slope_params_past = self.scales_config.get('slope_deg')
+                            slope_info_past = self.bio_info.get('slope_deg', {})
+                            slope_data_past = inverse_scale(slope_scaled_past, slope_params_past, slope_info_past)
+
+                        elev_data_past = None
+                        if 'wc2.1_30s_elev' in band_names_past:
+                            elev_idx_past = band_names_past.index('wc2.1_30s_elev')
+                            elev_data_past = inverse_scale(stack_past[elev_idx_past], self.scales_config.get('wc2.1_30s_elev'), self.bio_info.get('wc2.1_30s_elev', {}))
+
+                        water_data_past = None
+                        if 'Consensus_reduced_class_12' in band_names_past:
+                            water_idx_past = band_names_past.index('Consensus_reduced_class_12')
+                            water_data_past = inverse_scale(stack_past[water_idx_past], self.scales_config.get('Consensus_reduced_class_12'), self.bio_info.get('Consensus_reduced_class_12', {}))
+
+                        try:
+                            m_factor_multiplier_past = apply_decay_to_points(
+                                raster_shape=(self.H, self.W),
+                                transform=transform_past,
+                                observation_rows=self.rows_p, # Исходные точки присутствия (от них вид расселяется!)
+                                observation_cols=self.cols_p,
+                                buffer_km=self.M_FACTOR_CUR, # Используем текущую мобильность для всех эпох
+                                decay_type=self.M_FACTOR_DECAY_TYPE,
+                                decay_rate=self.M_FACTOR_DECAY_RATE,
+                                height_barrier=self.M_FACTOR_HEIGHT_BARRIER,
+                                slope_data=slope_data_past, elev_data=elev_data_past, water_data=water_data_past,
+                                is_bird=(['Aves'] == self.dclass)
+                            )
+                            suitability_p = suitability_p * m_factor_multiplier_past
+                        except Exception as e:
+                            print(f"Ошибка применения фактора мобильности для прошлого ({period_past}): {e}")
+                    
+                    
+                    out_name = f"{period_past}.tif"
+                    out_path = os.path.join(self.OUTPUT_PAST_DIR, out_name)
+                    save_geotiff(out_path, suitability_p, profile_past)
+                    print(f"Сохранено: {out_path}")
+                    
+                    threshold_list = [0.05, 0.25, 0.5, 0.75, 0.95, self.optimal_threshold, self.optimal_threshold/2]
+                    gsq, gsc = get_geotiff_square(out_path, threshold_list)
+                    
+                    out_name_img = f"{period_past}.jpg"
+                    out_path_img = os.path.join(self.OUTPUT_PAST_DIR, out_name_img)
+                    
+                    # Записываем статусы в словарь для JSON
+                    past_stats[period_past] = {
+                        'n05': gsc[0], 'n50': gsc[2], 'n95': gsc[4], 'n25': gsc[1], 'n75': gsc[3], 'nopt': gsc[5], 'nlow': gsc[6],
+                        's05': gsq[0], 's50': gsq[2], 's95': gsq[4], 's25': gsq[1], 's75': gsq[3], 'sopt': gsq[5], 'slow': gsq[6]
+                    }
+                    self.past_imgs.append(out_path_img)
+
+                    if period_past == 'learning':
+                        # Дублируем последний кадр для паузы в конце анимации
+                        self.past_imgs.extend([out_path_img, out_path_img, out_path_img])
+                    
+                    period_label = "Современность (базовый период)" if period_past == 'learning' else period_past
+                    
+                    title = ''
+                    if self.species != '':
+                        title = f"Карта вероятности присутствия вида {self.species} ({self.IN_ID})\nПериод: {period_label}"
+                    adt1 = f"\nSопт = {gsq[5]} кв.км, "
+                    adt2 = f"Sсубопт = {gsq[6]} кв.км"
+                    title = title + adt1 + adt2
+                    
+                    draw_map(out_path, out_path_img, title, self.pres_lons, self.pres_lats, id=self.IN_ID)
+                    os.remove(out_path) # удаляем tif для экономии места
+                    
+                except Exception as e:
+                    print(f"Ошибка прогноза прошлого для {period_past}: {e}")
+                    
+            try:
+                clean_past = clean_nans_for_json(past_stats)
+                self.MODEL_DATA['past_stats'] = clean_past
+                save_json(self.MODEL_DATA, self.JSON_FILENAME)
+            except Exception as e:
+                print(str(e))
+                
+            print(f"\nСоздаём анимацию прошлого:")
+            try:
+                if self.past_imgs:
+                    output_gif_path = os.path.join(self.OUTPUT_PAST_DIR, f"past_{self.IN_ID}.gif")
+                    output_mp4_path = os.path.join(self.OUTPUT_PAST_DIR, f"past_{self.IN_ID}.mp4")
+                    
+                    create_animated_gif(self.past_imgs, output_gif_path, duration=600)
+                    create_avi_from_images(self.past_imgs, output_mp4_path, 2)
+                    
+                    self.MODEL_DATA['output_paths']['past_gif'] = output_gif_path
+                    self.MODEL_DATA['output_paths']['past_mp4'] = output_mp4_path
+                    save_json(self.MODEL_DATA, self.JSON_FILENAME)
+            except Exception as e:
+                print("Ошибка создания анимации: " + str(e))
+                
+            print(f"\nВсе прогнозы прошлого сохранены в папку: '{self.OUTPUT_PAST_DIR}'")
+    
     
     
     # 16) Помесячный прогноз распространения вида

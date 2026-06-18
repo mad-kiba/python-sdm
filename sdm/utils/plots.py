@@ -484,9 +484,9 @@ def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title='', lons=[], 
     # наносим точки встреч на карту
     if len(lons)>0:
         # Рисуем ореол (glow) для лучшей видимости
-        ax.scatter(x_3857, y_3857, marker='o', s=25, color='#FF3D00', alpha=0.4, zorder=99, edgecolor='none')
+        ax.scatter(x_3857, y_3857, marker='o', s=6, color='#FF3D00', zorder=99, edgecolor='none')
         # Рисуем яркую сердцевину с белой окантовкой
-        ax.scatter(x_3857, y_3857, marker='o', s=8, color='#FFC107', zorder=100, edgecolor='white', linewidth=0.5)
+        ax.scatter(x_3857, y_3857, marker='o', s=4, color='#FFC107', zorder=100, edgecolor='white', linewidth=0.5)
         #print(f"Added {len(x_3857)} observation points to the map in EPSG:3857 using manual coordinate calculation.")
     
     # Оси в градусах (слева и снизу)
@@ -629,8 +629,8 @@ def draw_m_factor_map(OUTPUT_MFACTOR_TIF, OUTPUT_MFACTOR_JPG, title='', lons=[],
     x_3857, y_3857 = transformer.transform(lons, lats)
     
     if len(lons)>0:
-        ax.scatter(x_3857, y_3857, marker='o', s=25, color='#FF3D00', alpha=0.4, zorder=99, edgecolor='none')
-        ax.scatter(x_3857, y_3857, marker='o', s=8, color='#FFC107', zorder=100, edgecolor='white', linewidth=0.5)
+        ax.scatter(x_3857, y_3857, marker='o', s=6, color='#FF3D00', zorder=99, edgecolor='none')
+        ax.scatter(x_3857, y_3857, marker='o', s=4, color='#FFC107', zorder=100, edgecolor='white', linewidth=0.5)
     
     transformer_back = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
     cx = (xmin_v + xmax_v) / 2.0

@@ -324,12 +324,14 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
         # важно, чтобы все предикторы для будущего назывались аналогично настоящему
     if period == 'monthly':
         dynamic_subdir = os.path.join(raster_dir, "dynamic_monthly/"+str(interval))
+    if period == 'past':
+            dynamic_subdir = os.path.join(raster_dir, "dynamic_past/"+str(interval))
     
     # Собираем файлы из подпапки "static"
-    static_tifs = glob.glob(os.path.join(static_subdir, "*.tif"))
+    static_tifs = sorted(glob.glob(os.path.join(static_subdir, "*.tif")))
     
     # Собираем файлы из подпапки динамичных подпапок
-    dynamic_tifs = glob.glob(os.path.join(dynamic_subdir, "*.tif"))
+    dynamic_tifs = sorted(glob.glob(os.path.join(dynamic_subdir, "*.tif")))
 
     # Получаем список среднегодовых предикторов для их исключения при помесячном прогнозе
     dynamic_current_basenames = [os.path.basename(f) for f in glob.glob(os.path.join(raster_dir, "dynamic_current", "*.tif"))]
@@ -362,8 +364,8 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
         # и сохраняем их в порядке, заданном в predictors
         
         for expected_filename in expected_full_filenames:
-            # Если это помесячное моделирование, игнорируем среднегодовые предикторы
-            if period == 'monthly' and expected_filename in dynamic_current_basenames:
+            # Если это помесячное или прошлое моделирование, игнорируем среднегодовые предикторы
+            if period in ['monthly', 'past'] and expected_filename in dynamic_current_basenames:
                 continue
                 
             found = False
@@ -389,10 +391,10 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
             if found == False:
                 not_found_tifs.append(expected_filename)
                 
-        if period == 'monthly': # добавим помесячные предикторы
-            for path in dynamic_tifs:
-                if path not in desired_tifs_ordered:
-                    desired_tifs_ordered.append(path)
+        if period in ['monthly', 'past']: # добавим помесячные/прошлые предикторы
+                for path in dynamic_tifs:
+                    if path not in desired_tifs_ordered:
+                        desired_tifs_ordered.append(path)
     
         
     tifs = desired_tifs_ordered
@@ -454,7 +456,32 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
             band_arrays.append(arr)
             band_names.append(os.path.splitext(os.path.basename(fp))[0])
     
-    stack = np.stack(band_arrays, axis=0)  # shape: (bands, H, W)
+    
+    # --- Отделяем слои ледников (glz) от основных предикторов ---
+    glacier_mask = np.zeros((ref_height, ref_width), dtype=bool)
+    filtered_arrays = []
+    filtered_names = []
+    filtered_paths = []
+    
+    for i in range(len(band_arrays)):
+        arr = band_arrays[i]
+        name = band_names[i]
+        if 'glz' in name.lower():
+            # Слой ледника: всё что больше 0 считаем ледником
+            glacier_mask |= (np.nan_to_num(arr) > 0)
+        else:
+            filtered_arrays.append(arr)
+            filtered_names.append(name)
+            if band_paths: # Добавляем путь только если список не пустой
+                filtered_paths.append(band_paths[i])
+            
+    if not filtered_arrays:
+        raise ValueError("Не осталось предикторов после исключения слоёв ледников.")
+        
+    stack = np.stack(filtered_arrays, axis=0)  # shape: (bands, H, W)
+    band_names = filtered_names
+    band_paths = filtered_paths
+
     
     # Экстраполяция предикторов на водные пространства (Nearest Neighbor)
     print("Экстраполяция значений предикторов на акватории (Nearest Neighbor)...")
@@ -470,7 +497,14 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
             stack[i][close_enough] = stack[i][tuple(indices)][close_enough]
     
     # Маска валидных пикселей: валиден, если нет NaN во всех слоях
-    valid_mask = ~np.isnan(stack[0])
+    valid_mask = ~np.isnan(stack).any(axis=0)
+    
+    if not valid_mask.any():
+        nan_layers = [band_names[i] for i in range(stack.shape[0]) if np.isnan(stack[i]).all()]
+        if nan_layers:
+            raise ValueError(f"Невозможно продолжить: следующие слои не имеют данных (полностью NaN) в выбранном регионе:\n{', '.join(nan_layers)}")
+        else:
+            raise ValueError("Нет валидных пикселей для моделирования. Области данных на слоях не пересекаются.")
     # Теперь валидна не вся карта BBox, а только суша + 50 точек прибрежной зоны
 
     # Профиль для сохранения результата
@@ -490,6 +524,6 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
         "nodata": np.nan
     }
     
-    return stack, valid_mask, ref_transform, ref_crs, profile, band_names, band_paths
+    return stack, valid_mask, ref_transform, ref_crs, profile, band_names, band_paths, glacier_mask
 
 
