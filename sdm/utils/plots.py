@@ -368,7 +368,7 @@ def plot_geotiff_with_osm(geotiff_path: str, output_path: str, mean: float, scal
 
 
 # Отрисовывает карту вероятности присутствия вида, накладывая GeoTIFF поверх OpenStreetMap.
-def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title='', lons=[], lats=[], map_only=0, id=0):
+def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title='', lons=[], lats=[], map_only=0, id=0, period_label=''):
     """
     Отрисовывает карту вероятности присутствия вида, накладывая GeoTIFF поверх OpenStreetMap.
 
@@ -383,6 +383,7 @@ def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title='', lons=[], 
         lats (list/np.ndarray, optional): Широта (Y-координаты) точек наблюдений (в EPSG:4326). По умолчанию [].
         map_only (int, optional): Флаг (1/0) для отрисовки только точек без тепловой карты. По умолчанию 0.
         id (int, optional): Идентификатор модели (используется для генерации ссылок в подвале). По умолчанию 0.
+        period_label (str, optional): Крупная надпись периода для отображения в углу. По умолчанию ''.
     """
 
     data, transform, width, height = read_and_to_3857(OUTPUT_SUITABILITY_TIF)
@@ -522,6 +523,16 @@ def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title='', lons=[], 
     else:
         ax.set_title(title, pad=8, fontsize=title_fs)
     
+    # Отрисовка плашки с периодом в правом нижнем углу (если передано)
+    if period_label:
+        ax.text(0.98, 0.02, period_label,
+                transform=ax.transAxes,
+                fontsize=14,
+                color='white',
+                ha='right',
+                va='bottom',
+                bbox=dict(facecolor='black', alpha=0.6, edgecolor='none', boxstyle='round,pad=0.3'),
+                zorder=1000)
     
     plt.tight_layout()
     

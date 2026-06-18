@@ -1038,12 +1038,21 @@ class PythonSDM:
         adt1 = f"\nSопт = "+str(self.gsq[5])+f" кв.км (p>{self.optimal_threshold:.3f}), "
         adt2 = f"Sсубопт = "+str(self.gsq[6])+f" кв.км (p>{subopt:.3f})"
         title = title + adt1 + adt2
+
+        if month == 0:
+            period_label = "Наст. вр."
+        else:
+            months_ru = {1: 'январь', 2: 'февраль', 3: 'март', 4: 'апрель', 5: 'май', 6: 'июнь',
+                         7: 'июль', 8: 'август', 9: 'сентябрь', 10: 'октябрь', 11: 'ноябрь', 12: 'декабрь'}
+            period_label = months_ru.get(month, str(month))
         
         try:
             if self.n_presence>5:
-                draw_map(self.OUTPUT_SUITABILITY_TIF, self.OUTPUT_SUITABILITY_JPG, title, self.pres_lons, self.pres_lats, id=self.IN_ID)
+                draw_map(self.OUTPUT_SUITABILITY_TIF, self.OUTPUT_SUITABILITY_JPG, title, 
+                         self.pres_lons, self.pres_lats, id=self.IN_ID, period_label=period_label)
             else:
-                draw_map(self.OUTPUT_SUITABILITY_TIF_ORIG, self.OUTPUT_SUITABILITY_JPG, title, self.pres_lons, self.pres_lats, 1, id=self.IN_ID)
+                draw_map(self.OUTPUT_SUITABILITY_TIF_ORIG, self.OUTPUT_SUITABILITY_JPG, title, 
+                         self.pres_lons, self.pres_lats, 1, id=self.IN_ID, period_label=period_label)
         except Exception as e:
             print('Ошибка рисования карты')
             print(str(e))
@@ -1088,7 +1097,8 @@ class PythonSDM:
             title = title + adt1 + adt2
                 
             OUTPUT_SUITABILITY_JPG = self.OUTPUT_FUTURE_DIR + "/1981-2010.jpg"
-            draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title, self.pres_lons, self.pres_lats, id=self.IN_ID)
+            draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title, self.pres_lons, self.pres_lats, 
+                     id=self.IN_ID, period_label="Наст. вр.")
             print(f"Карта пригодности сохранена: {OUTPUT_SUITABILITY_JPG}")
             
             future_stats = {}
@@ -1205,7 +1215,8 @@ class PythonSDM:
                         adt2 = f"Sсубопт = "+str(gsq[6])+f" кв.км"
                         title = title + adt1 + adt2
                         
-                        draw_map(out_path, out_path_img, title, self.pres_lons, self.pres_lats, id=self.IN_ID)
+                        draw_map(out_path, out_path_img, title, self.pres_lons, self.pres_lats, 
+                                 id=self.IN_ID, period_label=period)
                         if scenario!='SSP370_EC-Earth3-Veg' and scenario!='ssp370':
                             os.remove(out_path) # пока не удаляем tif для будущего
             
@@ -1376,15 +1387,20 @@ class PythonSDM:
                             slope_info_past = self.bio_info.get('slope_deg', {})
                             slope_data_past = inverse_scale(slope_scaled_past, slope_params_past, slope_info_past)
 
+                        # Для прошлого ищем динамический слой орографии (orog) вместо современной высоты
                         elev_data_past = None
-                        if 'wc2.1_30s_elev' in band_names_past:
+                        orog_name = next((name for name in band_names_past if 'orog' in name.lower()), None)
+                        if orog_name:
+                            elev_idx_past = band_names_past.index(orog_name)
+                            elev_data_past = inverse_scale(stack_past[elev_idx_past], self.scales_config.get(orog_name), self.bio_info.get(orog_name, {}))
+                        elif 'wc2.1_30s_elev' in band_names_past:
                             elev_idx_past = band_names_past.index('wc2.1_30s_elev')
                             elev_data_past = inverse_scale(stack_past[elev_idx_past], self.scales_config.get('wc2.1_30s_elev'), self.bio_info.get('wc2.1_30s_elev', {}))
 
+                        # В прошлом водоемы были совершенно другими (Каспий пересыхал, ледники таяли).
+                        # Использование современной маски воды Consensus_12 приведет к ошибкам (вид не сможет заселить пересохший шельф).
+                        # Поэтому для ледниковых эпох мы отключаем водные барьеры и полагаемся только на горы и климат.
                         water_data_past = None
-                        if 'Consensus_reduced_class_12' in band_names_past:
-                            water_idx_past = band_names_past.index('Consensus_reduced_class_12')
-                            water_data_past = inverse_scale(stack_past[water_idx_past], self.scales_config.get('Consensus_reduced_class_12'), self.bio_info.get('Consensus_reduced_class_12', {}))
 
                         try:
                             m_factor_multiplier_past = apply_decay_to_points(
@@ -1435,7 +1451,18 @@ class PythonSDM:
                     adt2 = f"Sсубопт = {gsq[6]} кв.км"
                     title = title + adt1 + adt2
                     
-                    draw_map(out_path, out_path_img, title, self.pres_lons, self.pres_lats, id=self.IN_ID)
+                    period_label_map = "Наст. вр."
+                    if period_past != 'learning':
+                        match = re.search(r'([+-])(\d+)$', period_past)
+                        if match:
+                            sign = match.group(1)
+                            val = int(match.group(2))
+                            year = (val - 1) * 100 if sign == '+' else -(val * 100) - 100
+                            period_label_map = str(year)
+                    
+                    draw_map(out_path, out_path_img, title, self.pres_lons, self.pres_lats, 
+                             id=self.IN_ID, period_label=period_label_map)
+
                     os.remove(out_path) # удаляем tif для экономии места
                     
                 except Exception as e:
