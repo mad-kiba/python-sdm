@@ -1432,7 +1432,7 @@ class PythonSDM:
                     out_path_img = os.path.join(self.OUTPUT_PAST_DIR, out_name_img)
                     
                     # Записываем статусы в словарь для JSON
-                    past_stats[period_past] = {
+                    past_stats['p'+period_past.replace('-', '_').replace('+', '_')] = {
                         'n05': gsc[0], 'n50': gsc[2], 'n95': gsc[4], 'n25': gsc[1], 'n75': gsc[3], 'nopt': gsc[5], 'nlow': gsc[6],
                         's05': gsq[0], 's50': gsq[2], 's95': gsq[4], 's25': gsq[1], 's75': gsq[3], 'sopt': gsq[5], 'slow': gsq[6]
                     }
@@ -1457,7 +1457,7 @@ class PythonSDM:
                         if match:
                             sign = match.group(1)
                             val = int(match.group(2))
-                            year = (val - 1) * 100 if sign == '+' else -(val * 100) - 100
+                            year = val * 100 if sign == '+' else -(val * 100) 
                             period_label_map = str(year)
                     
                     draw_map(out_path, out_path_img, title, self.pres_lons, self.pres_lats, 

@@ -534,33 +534,25 @@ def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title='', lons=[], 
                 bbox=dict(facecolor='black', alpha=0.6, edgecolor='none', boxstyle='round,pad=0.3'),
                 zorder=1000)
     
-    plt.tight_layout()
-    
-    text2 = "https://wingeds.world/sdm/"+str(id)+" - модель распространения вида (SDM)"
+    # Устанавливаем фиксированные отступы, чтобы избежать использования tight_layout и bbox_inches='tight'
+    # Это гарантирует, что все изображения будут иметь одинаковый размер.
+    # Отступы подобраны так, чтобы вместить заголовок, подписи и нижний текст.
+    fig.subplots_adjust(left=0.08, right=0.92, top=0.92, bottom=0.1)
+
+    # Добавляем нижний текст с фиксированным расположением
     text1 = "https://wingeds.world/biodiv - карта биоразнообразия Центральной Азии"
-    font_size_text = 6 # Размер шрифта для дополнительного текста
-    vertical_offset = 0.03 # Начальный отступ от нижнего края графика (можно будет подстроить)
-    
-    renderer = fig.canvas.get_renderer()
-    bbox_axes = ax.get_tightbbox(renderer)
-    bottom_margin = 0.15
-    fig.subplots_adjust(bottom=0.18)
-    fig_height_inches = fig.get_size_inches()[1]
-    text_height_estimate = (font_size_text / 72.0) * 1.5 # Примерная высота двух строк + межстрочный интервал в дюймах
-    text_y_offset_relative = text_height_estimate / fig_height_inches
-    
-    fig.text(0.5, bottom_margin - text_y_offset_relative, text1,
-             ha='center', va='bottom', fontsize=font_size_text, wrap=True)
-    # Нижняя строка:
-    fig.text(0.5, bottom_margin - text_y_offset_relative * 2, text2,
-             ha='center', va='bottom', fontsize=font_size_text, wrap=True)
+    text2 = f"https://wingeds.world/sdm/{id} - модель распространения вида (SDM)"
+    font_size_text = 6
+
+    fig.text(0.5, 0.04, text1, ha='center', va='bottom', fontsize=font_size_text, wrap=True)
+    fig.text(0.5, 0.01, text2, ha='center', va='bottom', fontsize=font_size_text, wrap=True)
     
     # print('Сохранение карты: '+OUTPUT_SUITABILITY_JPG)
     # Сохранение с высоким разрешением (длина ≥ 2000 px)
     plt.savefig(
         OUTPUT_SUITABILITY_JPG,
         dpi=dpi,
-        bbox_inches="tight",
+        # bbox_inches="tight" убран, чтобы размер был строго фиксированным
         facecolor=fig.get_facecolor(),
     )
     

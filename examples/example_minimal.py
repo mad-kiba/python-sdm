@@ -32,6 +32,9 @@ config = {
         'BG_DISTANCE_MAX': 0, # указывается в шагах сетки
         #'DO_GISTO': 1, # нужно ли рисовать гистограммы
         'DO_GISTO': 0,
+        'M_FACTOR_DECAY_TYPE': 'sigmoid',
+        'M_FACTOR_DECAY_RATE': 0.1,
+        'M_FACTOR_HEIGHT_BARRIER': 500,
         'SCENARIOS': 'all',
         'JOBS': {}
 }

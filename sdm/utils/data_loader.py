@@ -443,6 +443,12 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
         with rasterio.open(fp) as ds:
             arr = ds.read(1, masked=True)
             arr = np.ma.filled(arr.astype("float32"), np.nan) # Обязательно превращаем NoData в NaN
+
+            # --- РЕШЕНИЕ ПРОБЛЕМЫ С КАТЕГОРИАЛЬНЫМИ СЛОЯМИ (Кёппен и др.) ---
+            # Если слой категориальный (например, зоны Кёппена), заменяем NaN на 0.
+            if any(cat_str in os.path.basename(fp) for cat_str in ['_kg', 'Consensus_', '_swe_']):
+                np.nan_to_num(arr, copy=False, nan=0.0)
+
             if i == 0:
                 ref_transform = ds.transform
                 ref_width, ref_height = ds.width, ds.height
@@ -525,5 +531,3 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
     }
     
     return stack, valid_mask, ref_transform, ref_crs, profile, band_names, band_paths, glacier_mask
-
-
