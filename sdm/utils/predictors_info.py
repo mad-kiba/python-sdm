@@ -4,6 +4,15 @@ def get_predictors_info():
         'slope_deg':                        {'title': 'Уклон рельефа на заданном шаге модели', 'unit': '', 'scale': 1, 'diff': 0, 'min_val': 0},
         'distance_to_cities':               {'title': 'Расстояние до городской застройки', 'unit': 'км', 'scale': 1, 'diff': 0, 'step': 1, 'min_val': 0, 'min_val': 0},
         'distance_to_water':                {'title': 'Расстояние до водоёмов', 'unit': 'км', 'scale': 1, 'diff': 0, 'min_val': 0, 'step': 1},
+
+        'human_bias_alls':                  {'title': 'Human bias factor: все классы', 'unit': '', 'scale': 1, 'diff': 0, 'min_val': 0, 'step': 1},
+        'human_bias_Insecta':               {'title': 'Human bias factor: насекомые', 'unit': '', 'scale': 1, 'diff': 0, 'min_val': 0, 'step': 1},
+        'human_bias_Mammalia':              {'title': 'Human bias factor: млекопитающие', 'unit': '', 'scale': 1, 'diff': 0, 'min_val': 0, 'step': 1},
+        'human_bias_Aves':                  {'title': 'Human bias factor: птицы', 'unit': '', 'scale': 1, 'diff': 0, 'min_val': 0, 'step': 1},
+        'human_bias_Amphibia':              {'title': 'Human bias factor: амфибии', 'unit': '', 'scale': 1, 'diff': 0, 'min_val': 0, 'step': 1},
+        'human_bias_Squamata':              {'title': 'Human bias factor: чешуйчатые', 'unit': '', 'scale': 1, 'diff': 0, 'min_val': 0, 'step': 1},
+        'human_bias_Testudines':            {'title': 'Human bias factor: черепахи', 'unit': '', 'scale': 1, 'diff': 0, 'min_val': 0, 'step': 1},
+
         'wc2.1_30s_elev':                   {'title': 'WC ELEV: Высота над уровнем моря', 'unit': 'м', 'scale': 1, 'diff': 0, 'step': 1, 'min_val': -200},
         
         'wc2.1_30s_bio_1':                  {'title': 'WC BIO1: Среднегодовая температура (Mean annual temperature)', 'unit': '°C', 'scale': 1, 'diff': 0, 'min_val': -100},

@@ -11,6 +11,7 @@ import json
 import math
 import glob
 import zipfile
+import rasterio
 import xgboost as xgb
 import numpy as np
 import pandas as pd
@@ -113,6 +114,9 @@ class PythonSDM:
         self.OUTPUT_SEASONS_DIR = os.path.join(self.OUTPUT_SEASONS_DIR, str(self.IN_ID))
         
         self.RAW_RASTER_DIR = "input_predictors"
+        # Параметры для bias correction, которые могут быть переопределены из config
+        self.USE_BIAS_LAYER_FOR_MFACTOR = getattr(self, 'USE_BIAS_LAYER_FOR_MFACTOR', 1)
+        self.MFACTOR_BIAS_STRENGTH = getattr(self, 'MFACTOR_BIAS_STRENGTH', 2.0)
         self.PREDICTORS_JPEGS = "output/predictors_jpegs"
         
         
@@ -174,6 +178,12 @@ class PythonSDM:
                 'model_type': self.IN_MODEL,
                 'allowed_coord_uncertain_m': getattr(self, 'ALLOWED_COORD_UNCERTAIN', 1000),
                 'minimum_year_allowed': getattr(self, 'MINIMUM_YEAR_ALLOWED', 2000)
+            },
+            'bias_correction': {
+                'use_for_bg_sampling': self.USE_BIAS_LAYER_FOR_BG,
+                'bg_sampling_strength': self.BIAS_SAMPLING_STRENGTH,
+                'use_for_m_factor': self.USE_BIAS_LAYER_FOR_MFACTOR,
+                'm_factor_strength': self.MFACTOR_BIAS_STRENGTH
             },
             'output_paths': {
                 'suitability_tif': self.OUTPUT_SUITABILITY_TIF,
@@ -494,6 +504,48 @@ class PythonSDM:
         
         print(f"Текущие факторы мобильности: {self.M_FACTOR_CUR}, {self.M_FACTOR_2040}, {self.M_FACTOR_2070}, {self.M_FACTOR_2100}")
         
+        # --- Загрузка слоя предвзятости (human bias) для взвешенного сэмплирования ---
+        bias_weights = None
+        bias_scale_params = None
+        bias_layer_name = None
+        
+        if self.USE_BIAS_LAYER_FOR_BG == 1:
+            print("Активирован режим учета предвзятости наблюдений (human bias).")
+            bias_layer_path = None
+            # Пытаемся найти слой для конкретного класса
+            if self.dclass and self.dclass[0]:
+                class_specific_bias_filename = f"human_bias_{self.dclass[0]}.tif"
+                bias_layer_name = os.path.splitext(class_specific_bias_filename)[0]
+                # Ищем в папках static и dynamic_current
+                potential_path_static = os.path.join(self.RASTER_DIR, "static", class_specific_bias_filename)
+                potential_path_dynamic = os.path.join(self.RASTER_DIR, "dynamic_current", class_specific_bias_filename)
+                
+                if os.path.exists(potential_path_static):
+                    bias_layer_path = potential_path_static
+                elif os.path.exists(potential_path_dynamic):
+                    bias_layer_path = potential_path_dynamic
+
+            # Если не нашли, ищем общий слой 'bias_all'
+            if not bias_layer_path:
+                general_bias_filename = "human_bias_alls.tif"
+                bias_layer_name = os.path.splitext(general_bias_filename)[0]
+                potential_path_static = os.path.join(self.RASTER_DIR, "static", general_bias_filename)
+                if os.path.exists(potential_path_static):
+                    bias_layer_path = potential_path_static
+
+            try:
+                if bias_layer_path:
+                    print(f"Загрузка слоя предвзятости: {bias_layer_path}")
+                    with rasterio.open(bias_layer_path) as src:
+                        bias_weights = src.read(1)
+                    # Загружаем параметры масштабирования для этого слоя
+                    if bias_layer_name and self.scales_config.get(bias_layer_name):
+                        bias_scale_params = self.scales_config[bias_layer_name]
+                        print(f"Найдены параметры масштабирования для слоя '{bias_layer_name}'.")
+            except Exception as e:
+                print('Ошибка загрузки слоя предвзятости:')
+                print(e)
+
         print(f"\n-- Генерация фоновых точек и точек псевдоотсутствия ({self.IN_ID})")
         print(f"Вычисленные параметры точек: BG_PC={self.BG_PC},"+\
               f"BG_DISTANCE_MIN={self.BG_DISTANCE_MIN}, BG_DISTANCE_MAX={self.BG_DISTANCE_MAX}")
@@ -520,7 +572,9 @@ class PythonSDM:
             
             self.rows_bg, self.cols_bg, self.rows_random, self.cols_random, self.rows_buffer, self.cols_buffer = sample_background(self.valid_mask,
                                                            set(map(tuple, self.pres_rc)), n_bg,
-                                                           rng, self.BG_PC, self.BG_DISTANCE_MIN, self.BG_DISTANCE_MAX)
+                                                           rng, self.BG_PC, self.BG_DISTANCE_MIN, self.BG_DISTANCE_MAX,
+                                                           bias_weights_map=bias_weights, bias_sampling_strength=self.BIAS_SAMPLING_STRENGTH,
+                                                           bias_scale_params=bias_scale_params)
 
             if month == 0:
                 self.MODEL_DATA['mobility_factors'] = {
@@ -775,13 +829,11 @@ class PythonSDM:
         print(f"\n-- 11. Прогноз на всю область и сохранение карты пригодности ({self.IN_ID})")
         
         self.suitability = predict_suitability_for_stack(self.model, self.stack, self.valid_mask, batch_size=500_000)
-
+        
         # Зона ледников полностью непригодна для жизни
         if hasattr(self, 'glacier_mask') and self.glacier_mask is not None:
             self.suitability[self.glacier_mask & self.valid_mask] = 0.0
 
-        self.suitability = predict_suitability_for_stack(self.model, self.stack, self.valid_mask, batch_size=500_000)
-        
         # --- BAM-фреймворк: Применение M-фактора (мобильность с учетом рельефа) ---
         if self.M_FACTOR_CUR != -1:
             m_factor_multiplier = np.ones_like(self.suitability) # Инициализация по умолчанию
@@ -806,6 +858,37 @@ class PythonSDM:
                     elev_info = self.bio_info.get('wc2.1_30s_elev', {})
                     elev_data = inverse_scale(elev_scaled, elev_params, elev_info)
                     print("  Слой высоты найден! Горы будут физическим барьером.")
+
+                bias_data_m = None
+                if self.USE_BIAS_LAYER_FOR_MFACTOR == 1:
+                    print("  Активирован учет предвзятости наблюдений для M-фактора.")
+                    bias_layer_path_m = None
+                    bias_layer_name_m = None
+                    
+                    if self.dclass and self.dclass[0]:
+                        class_specific_bias_filename = f"human_bias_{self.dclass[0]}.tif"
+                        bias_layer_name_m = os.path.splitext(class_specific_bias_filename)[0]
+                        potential_path_static = os.path.join(self.RASTER_DIR, "static", class_specific_bias_filename)
+                        if os.path.exists(potential_path_static):
+                            bias_layer_path_m = potential_path_static
+
+                    if not bias_layer_path_m:
+                        general_bias_filename = "human_bias_alls.tif"
+                        bias_layer_name_m = os.path.splitext(general_bias_filename)[0]
+                        potential_path_static = os.path.join(self.RASTER_DIR, "static", general_bias_filename)
+                        if os.path.exists(potential_path_static):
+                            bias_layer_path_m = potential_path_static
+
+                    if bias_layer_path_m:
+                        print(f"  Загрузка слоя предвзятости для M-фактора: {bias_layer_path_m}")
+                        with rasterio.open(bias_layer_path_m) as src:
+                            bias_weights_m = src.read(1)
+                        if bias_layer_name_m and self.scales_config.get(bias_layer_name_m):
+                            bias_scale_params_m = self.scales_config[bias_layer_name_m]
+                            bias_data_m = inverse_scale(bias_weights_m, bias_scale_params_m, {})
+                        else:
+                            bias_data_m = bias_weights_m # Используем как есть, если нет параметров
+
                     
                 water_data = None
                 if 'Consensus_reduced_class_12' in self.band_names:
@@ -833,6 +916,7 @@ class PythonSDM:
                     water_data=water_data,
                     is_bird=is_bird,
                     dclass=self.dclass,
+                    bias_data=bias_data_m
                 )
                 
                 # Умножаем оригинальную пригодность (Абиотика) на M-фактор (Мобильность)

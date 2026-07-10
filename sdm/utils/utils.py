@@ -31,6 +31,7 @@ def apply_decay_to_points(
     elev_data: np.ndarray = None,
     water_data: np.ndarray = None,
     is_bird: bool = False,
+    bias_data: np.ndarray = None,
     dclass: list = None,
     height_barrier: float = 500,
 ):
@@ -53,6 +54,7 @@ def apply_decay_to_points(
         elev_data (np.ndarray, optional): 2D массив с абсолютной высотой (м) для учета климатических пределов.
         water_data (np.ndarray, optional): 2D массив с % открытой воды (0-100) для водных барьеров.
         is_bird (bool): Флаг для птиц (игнорируют водные барьеры).
+        bias_data (np.ndarray, optional): 2D массив со слоем предвзятости наблюдений (human bias).
         dclass (list, optional): Список с названием класса животного (например, ['Amphibia']).
 
     Returns:
@@ -72,7 +74,7 @@ def apply_decay_to_points(
     _, _, pixel_size_m = geod.inv(lon1, lat1, lon2, lat2)
     pixel_size_km = abs(pixel_size_m) / 1000.0
 
-    use_fmm = slope_data is not None or elev_data is not None or water_data is not None
+    use_fmm = any(data is not None for data in [slope_data, elev_data, water_data, bias_data])
 
     if use_fmm:
         try:
@@ -84,6 +86,15 @@ def apply_decay_to_points(
             # Базовая скорость перемещения
             speed = np.ones(raster_shape, dtype=np.float32)
             
+            # 0. Штраф за предвзятость наблюдений (Human Bias)
+            if bias_data is not None:
+                # Нормализуем bias_data в диапазон [0, 1] для предсказуемости
+                max_bias = np.nanmax(bias_data)
+                if max_bias > 0:
+                    normalized_bias = np.nan_to_num(bias_data / max_bias)
+                    # Чем выше bias, тем ниже скорость. Используем экспоненциальное затухание.
+                    speed *= np.exp(-normalized_bias * 2.0) # Коэффициент 2.0 можно настраивать
+
             # 1. Штраф за крутые уклоны (Горы обходятся "дорого")
             if slope_data is not None:
                 speed *= np.exp(-np.clip(slope_data, 0, None) / 20.0)
@@ -836,7 +847,8 @@ def extract_features_from_stack(stack, rows, cols):
 
 # Сэмплирует n_bg фоновых пикселей, разделяя их на две части
 def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
-                      distance_min_pixels = 1, distance_max_pixels = 1):
+                      distance_min_pixels = 1, distance_max_pixels = 1, bias_weights_map=None, bias_scale_params=None,
+                      bias_sampling_strength=1.0):
     """
     Сэмплирует n_bg фоновых пикселей, разделяя их на две части:
     1. 50% точек - случайно в пределах valid_mask (исключая точки присутствия).
@@ -850,6 +862,9 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
         rng (np.random.Generator): Объект генератора случайных чисел.
         distance_min_pixels (float): Минимальное расстояние в пикселях от точек присутствия для генерации фона.
         distance_max_pixels (float): Максимальное расстояние в пикселях от точек присутствия для генерации фона.
+        bias_weights_map (np.ndarray, optional): 2D массив с весами для сэмплирования (слой human bias).
+        bias_scale_params (dict, optional): Словарь с 'mean' и 'scale' для обратного масштабирования bias_weights_map.
+        bias_sampling_strength (float, optional): Доля (0.0-1.0) случайных точек, которые будут сэмплироваться с учетом bias.
 
     Returns:
         tuple: Кортеж (rows_bg, cols_bg) - массивы строк и столбцов фоновых точек.
@@ -886,7 +901,63 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
         rows_random, cols_random = np.array([], dtype=np.int64), np.array([], dtype=np.int64)
     else:
         n_bg_random = min(n_bg_random, candidates_random.size)
-        chosen_random = rng.choice(candidates_random, size=n_bg_random, replace=False)
+
+        if bias_weights_map is not None and bias_sampling_strength > 0 and candidates_random.size > 0:
+            print(f"Применяется гибридное взвешенное сэмплирование (сила = {bias_sampling_strength * 100}%)...")
+            
+            n_biased = int(n_bg_random * bias_sampling_strength)
+            n_uniform = n_bg_random - n_biased
+
+            # --- Часть 1: Взвешенное сэмплирование ---
+            chosen_biased = np.array([], dtype=np.int64)
+            if n_biased > 0 and candidates_random.size > 0:
+                weights = bias_weights_map.ravel()[candidates_random]
+                
+                # 1. Обратное масштабирование, если параметры переданы
+                if bias_scale_params and 'mean' in bias_scale_params and 'scale' in bias_scale_params:
+                    print("Выполняется обратное масштабирование весов предвзятости...")
+                    mean = bias_scale_params['mean']
+                    scale = bias_scale_params['scale']
+                    weights = weights * scale + mean
+                
+                # 2. Обеспечиваем неотрицательность и сглаживаем
+                # Устанавливаем отрицательные значения в 0, так как они означают плотность наблюдений ниже средней
+                weights[weights < 0] = 0
+                # Логарифмическое преобразование для сглаживания экстремальных пиков
+                weights = np.log1p(weights.astype(np.float64)) # log1p(x) = log(1+x)
+
+                total_weight = np.sum(weights)
+                if total_weight > 0 and not np.isnan(total_weight):
+                    probabilities = weights / total_weight
+                    # Защита от ситуации, когда n_biased > len(candidates_random)
+                    size_to_sample = min(n_biased, len(candidates_random))
+                    try:
+                        chosen_biased = rng.choice(candidates_random, size=size_to_sample, replace=False, p=probabilities)
+                    except ValueError as e:
+                        # Эта ошибка может возникнуть, если сумма вероятностей не равна 1.0 из-за ошибок округления.
+                        # В этом случае нормализуем еще раз.
+                        print(f"Предупреждение при взвешенном сэмплировании: {e}. Повторная нормализация вероятностей.")
+                        probabilities /= np.sum(probabilities)
+                        chosen_biased = rng.choice(candidates_random, size=size_to_sample, replace=False, p=probabilities)
+                else: # Если все веса нулевые, эта часть будет пустой
+                    n_uniform += n_biased # Добавляем недостающие точки к равномерной выборке
+
+            # --- Часть 2: Равномерное случайное сэмплирование ---
+            chosen_uniform = np.array([], dtype=np.int64)
+            if n_uniform > 0 and candidates_random.size > 0:
+                # Исключаем уже выбранные взвешенные точки, чтобы не было дублей
+                remaining_candidates = np.setdiff1d(candidates_random, chosen_biased, assume_unique=True)
+                if remaining_candidates.size > 0:
+                    n_uniform = min(n_uniform, remaining_candidates.size)
+                    chosen_uniform = rng.choice(remaining_candidates, size=n_uniform, replace=False)
+
+            chosen_random = np.concatenate((chosen_biased, chosen_uniform))
+
+        else:
+            # Стандартное равномерное сэмплирование
+            print("Применяется стандартное равномерное сэмплирование фона (bias слой не используется или сила=0)...")
+            chosen_random = rng.choice(candidates_random, size=n_bg_random, replace=False)
+
         rows_random = chosen_random // width
         cols_random = chosen_random % width
 
