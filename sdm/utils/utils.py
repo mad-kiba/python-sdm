@@ -31,6 +31,7 @@ def apply_decay_to_points(
     elev_data: np.ndarray = None,
     water_data: np.ndarray = None,
     is_bird: bool = False,
+    dclass: list = None,
     height_barrier: float = 500,
 ):
     """
@@ -52,6 +53,7 @@ def apply_decay_to_points(
         elev_data (np.ndarray, optional): 2D массив с абсолютной высотой (м) для учета климатических пределов.
         water_data (np.ndarray, optional): 2D массив с % открытой воды (0-100) для водных барьеров.
         is_bird (bool): Флаг для птиц (игнорируют водные барьеры).
+        dclass (list, optional): Список с названием класса животного (например, ['Amphibia']).
 
     Returns:
         np.ndarray: 2D матрица множителей (0.0 ... 1.0).
@@ -97,10 +99,20 @@ def apply_decay_to_points(
                     speed[elev_data > max_elev] *= 0.05
                     speed[elev_data < min_elev] *= 0.05
                     
-            # 3. Штраф за водные барьеры (Моря и крупные озера)
-            if water_data is not None and not is_bird:
-                # Если пиксель более чем на 50% состоит из открытой воды, животное не пройдет
-                speed[water_data > 50] *= 0.001
+            # 3. Обработка водных пространств (барьеры или коридоры)
+            if water_data is not None:
+                # Определяем классы, для которых вода - коридор
+                water_corridor_classes = ['Amphibia', 'Pisces'] # Рыбы, если будут
+
+                is_water_species = dclass and any(c in water_corridor_classes for c in dclass)
+
+                if is_water_species:
+                    # Для амфибий и рыб вода - это "хайвей". Увеличиваем скорость.
+                    # Чем больше воды, тем выше скорость (плавный бонус).
+                    speed *= (1.0 + (water_data / 100.0) * 4.0) # Бонус до 5x в полностью водных пикселях
+                elif not is_bird:
+                    # Для остальных наземных видов вода - барьер.
+                    speed[water_data > 50] *= 0.001
             
             speed = np.maximum(speed, 0.001) # Защита от деления на ноль
             

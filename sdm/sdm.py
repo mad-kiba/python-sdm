@@ -5,6 +5,7 @@
 
 import os
 import re
+import time
 import traceback
 import json
 import math
@@ -52,6 +53,7 @@ class PythonSDM:
         if not j:
             self.JOBS[self.IN_ID] = {'status': 'queued', 'file': None, 'error': None}
         
+        self.timing_stats = {}
         self.JSON_FILENAME = f"output/texts/{self.IN_ID}/{self.IN_ID}.json"
 
         # если нулевые параметры - это запрос на данные из старого расчёта
@@ -142,6 +144,8 @@ class PythonSDM:
         self.RANDOM_SEED = 42
         np.random.seed(self.RANDOM_SEED)
         
+        self.source_occ = None # Инициализируем атрибут
+        self.occ = None # Инициализируем атрибут
         self.MONTH_FILENAME = f"output/texts/{self.IN_ID}/{self.IN_ID}_month.txt"
         self.CSV_FILENAME = f"output/texts/{self.IN_ID}/{self.IN_ID}.csv"
         self.CSV_FILENAME_ADD = f"output/texts/{self.IN_ID}/{self.IN_ID}_add.csv"
@@ -186,17 +190,20 @@ class PythonSDM:
     # 1) Подготовка предикторов к нужным координатам
     def prepare_predictors(self): 
         print(f"\n-- 1. Подготовка предикторов ({self.IN_ID})")
+        start_time = time.time()
         try:
             clip_rasters(self.RAW_RASTER_DIR, self.OUTPUT_RASTER_DIR, self.IN_MIN_LAT, self.IN_MIN_LON,
                          self.IN_MAX_LAT, self.IN_MAX_LON, self.MODEL_FUTURE, self.MODEL_PAST, self.MODEL_SEASON, self.IN_RESOLUTION)
         except Exception as e:
             return handle_model_error(e, self.ERROR_FILENAME, self.MODEL_DATA, self.JSON_FILENAME, 'Ошибка подготовки предикторов:')
+        self.timing_stats['prepare_predictors_sec'] = round(time.time() - start_time, 2)
         
     
     # 2) Загрузка присутствий
     def load_occurrences(self): 
         print(f"\n-- 2. Загрузка наблюдений ({self.IN_ID})")
-        
+        start_time = time.time()
+
         try:
             ret = load_species_occurrence_data(self.IN_ID, self.IN_CSV, self.IN_CSV_ADDITIONAL,
                                                self.CSV_FILENAME, self.CSV_FILENAME_ADD, 
@@ -219,18 +226,22 @@ class PythonSDM:
 
         if 'occurrences' not in self.MODEL_DATA:
             self.MODEL_DATA['occurrences'] = {}
+        
         self.MODEL_DATA['occurrences']['total_obs_in_csv'] = ret.get('total_obs_in_csv', 0)
         self.MODEL_DATA['occurrences']['monthly_counts'] = ret.get('monthly_counts', {})
         self.MODEL_DATA['occurrences']['filtered_valid'] = len(self.occ)
+
         self.MODEL_DATA['species_info'] = {
             'kingdom': self.kingdom,
             'class': self.dclass,
             'species': self.species
         }
+        self.timing_stats['load_occurrences_sec'] = round(time.time() - start_time, 2)
     
     
     # 3) Загрузка стека предикторов
     def load_predictors(self, period = 'current', month = ''): 
+        start_time = time.time()
         print(f"\n-- 3. Загрузка предикторов ({self.IN_ID})")
         try:
             if os.path.exists(self.SCALES_FILE):
@@ -266,18 +277,22 @@ class PythonSDM:
                 'band_names': self.band_names
             }
             save_json(self.MODEL_DATA, self.JSON_FILENAME)
+        self.timing_stats['load_predictors_sec'] = round(time.time() - start_time, 2)
     
     
     # 4) Привязка присутствий к пикселям растра и фильтрация по маске валидности
     def prepare_data(self, month = 0): 
+        start_time = time.time()
         print(f"\n-- 4. Привязка присутствий к пикселям растра и фильтрация по маске валидности ({self.IN_ID})")
-        if (month!=0):
+        if month != 0 and self.source_occ is not None:
             self.occ = self.source_occ.dropna().copy()
             self.occ.loc[:, 'month'] = self.occ['month'].astype(int)
             self.occ = self.occ[(self.occ['month'])==month]
-        else:
-            self.occ = self.source_occ
         
+        if self.occ is None:
+            err_msg = "DataFrame с точками наблюдений (self.occ) не был инициализирован. Вероятно, произошла ошибка на этапе load_occurrences."
+            return handle_model_error(err_msg, self.ERROR_FILENAME, self.MODEL_DATA, self.JSON_FILENAME, 'Ошибка данных наблюдений')
+            
         rows, cols, inside = points_to_pixel_indices(self.occ[self.LON_COL].values, self.occ[self.LAT_COL].values,\
                                                      self.transform, self.W, self.H)
         # Фильтруем те, что внутри растра
@@ -306,10 +321,12 @@ class PythonSDM:
         
         self.rows = rows
         self.cols = cols
+        self.timing_stats['prepare_data_sec'] = round(time.time() - start_time, 2)
         
         
     # 5) Дедупликация по пикселю (30″ клетка) — оставляем по одному наблюдению на клетку
     def deduplicate_data(self, month = 0): 
+        start_time = time.time()
         print(f"\n-- 5. Дедупликация по пикселю — оставляем по одному наблюдению на клетку ({self.IN_ID})")
         
         # Оставляем строго 1 точку на 1 уникальный пиксель растра
@@ -343,10 +360,12 @@ class PythonSDM:
         self.n_presence = n_presence
         self.rows_p = rows_p
         self.cols_p = cols_p
+        self.timing_stats['deduplicate_data_sec'] = round(time.time() - start_time, 2)
 
 
     # 6) Генерация фоновых точек и точек псевдоотсутствия, а также фактора мобильности
     def generate_bg_pa(self, month = 0): 
+        start_time = time.time()
         print(f"\n-- 6. Генерация фоновых точек и точек псевдоотсутствия ({self.IN_ID})")
         
         # границы распространения вида, фактор мобильности по умолчанию
@@ -531,10 +550,12 @@ class PythonSDM:
             print('Ошибка генерации фоновых точек:')
             print(e)
 
+        self.timing_stats['generate_background_sec'] = round(time.time() - start_time, 2)
+
     
     # 7) Извлечение признаков
     def extract_features(self): 
-            print(f"\n-- 7. Извлечение признаков ({self.IN_ID})")
+            start_time = time.time()
             self.X_pres = extract_features_from_stack(self.stack, self.rows_p, self.cols_p)
             self.X_bg = extract_features_from_stack(self.stack, self.rows_bg, self.cols_bg)
             self.X_orig = extract_features_from_stack(self.stack, self.rows, self.cols)
@@ -561,10 +582,12 @@ class PythonSDM:
 
                 
             print(f"Матрица признаков: {self.X.shape}, классы: {np.bincount(self.y)}")
+            self.timing_stats['extract_features_sec'] = round(time.time() - start_time, 2)
 
 
     # 8) постройка гистограмм
     def draw_gistos(self): 
+        start_time = time.time()
         if self.DO_GISTO == 1:
             print(f"\n-- 8. Постройка гистограмм ({self.IN_ID})")
             num_predictors = len(self.band_names) # Получаем точное количество предикторов
@@ -656,10 +679,12 @@ class PythonSDM:
                         zipf.write(file_path, os.path.basename(file_path))
                 
                 print(f"Все файлы из '{self.OUTPUT_HISTOGRAMS_DIR}/{self.IN_ID}' успешно упакованы в '{archive_path}'.")
+        self.timing_stats['draw_histograms_sec'] = round(time.time() - start_time, 2)
 
     
     # 9) Разделение на train/test
     def split_train_test(self): 
+        start_time = time.time()
         print(f"\n-- 9. Разделение на train/test ({self.IN_ID})")
         
         # --- КЛАССИЧЕСКОЕ РАЗБИЕНИЕ (Случайное стратифицированное) ---
@@ -667,10 +692,12 @@ class PythonSDM:
             self.X, self.y, test_size=0.2, stratify=self.y, random_state=self.RANDOM_SEED
         )
         print("Успешно применено случайное стратифицированное разбиение (80/20).")
+        self.timing_stats['split_train_test_sec'] = round(time.time() - start_time, 2)
         
 
     # 10) Обучение модели
     def train_model(self, month = 0): 
+        start_time = time.time()
         print(f"\n-- 10. Обучение валидационной модели (на {len(self.X_train)} точках) ({self.IN_ID})")
         
         # --- 1. ОБУЧЕНИЕ МОДЕЛИ ДЛЯ ОЦЕНКИ (На Train выборке) ---
@@ -739,10 +766,12 @@ class PythonSDM:
                 raise ValueError(f"Неизвестный или неподдерживаемый тип алгоритма: '{self.IN_MODEL}'")
         except Exception as e:
             return handle_model_error(e, self.ERROR_FILENAME, self.MODEL_DATA, self.JSON_FILENAME, 'Ошибка обучения финальной модели')
+        self.timing_stats['train_model_sec'] = round(time.time() - start_time, 2)
 
 
     # 11) Прогноз на всю область и сохранение карты пригодности
     def predict_current(self, month = 0):
+        start_time = time.time()
         print(f"\n-- 11. Прогноз на всю область и сохранение карты пригодности ({self.IN_ID})")
         
         self.suitability = predict_suitability_for_stack(self.model, self.stack, self.valid_mask, batch_size=500_000)
@@ -803,6 +832,7 @@ class PythonSDM:
                     elev_data=elev_data,
                     water_data=water_data,
                     is_bird=is_bird,
+                    dclass=self.dclass,
                 )
                 
                 # Умножаем оригинальную пригодность (Абиотика) на M-фактор (Мобильность)
@@ -887,10 +917,12 @@ class PythonSDM:
                 print("Сохранены фоновые точки (буферные): used_buffer_"+str(self.IN_ID)+".csv")
             
             save_json(self.MODEL_DATA, self.JSON_FILENAME)
+        self.timing_stats['predict_current_sec'] = round(time.time() - start_time, 2)
 
     
     # 12) Вычисление пространственных метрик и метрик качества
     def calculate_metrics(self, month=0): 
+        start_time = time.time()
         print(f"\n-- 12. Вычисление пространственных метрик и метрик качества ({self.IN_ID})")
         
         try:
@@ -998,6 +1030,7 @@ class PythonSDM:
         threshold_list = [0.05, 0.25, 0.5, 0.75, 0.95, self.optimal_threshold, self.optimal_threshold/2]
         self.gsq, self.gsc = get_geotiff_square(self.OUTPUT_SUITABILITY_TIF, threshold_list)
         
+        self.MODEL_DATA['current_optimal_area_km2'] = self.gsq[5]
         if month==0:
             self.MODEL_DATA['area_metrics'] = {
                 'square_km': {
@@ -1020,10 +1053,12 @@ class PythonSDM:
                 }
             }
             save_json(self.MODEL_DATA, self.JSON_FILENAME)
+        self.timing_stats['calculate_metrics_sec'] = round(time.time() - start_time, 2)
 
     
     # 13) Рисование карт распространения вида
     def draw_map_current(self, month = 0): 
+        start_time = time.time()
         print(f"\n-- 13. Рисуем карту ({self.IN_ID})")
         title = ''
         if self.species!='':
@@ -1064,10 +1099,12 @@ class PythonSDM:
                     os.remove(self.OUTPUT_SUITABILITY_TIF)
         
         print(f"Карта присутствия сохранена в формате JPEG: {self.OUTPUT_SUITABILITY_JPG}")
+        self.timing_stats['draw_map_current_sec'] = round(time.time() - start_time, 2)
     
     
     # 14) Прогноз распространения вида в будущем
     def predict_future(self): 
+        start_time = time.time()
         if self.MODEL_FUTURE==1 and self.IN_MODEL!='MaxEnt':
             print(f"\n-- 14. Приступаю к прогнозу будущего ({self.IN_ID})")
             # Пути
@@ -1108,6 +1145,7 @@ class PythonSDM:
             
             # 14.1) Прогноз для будущих периодов/сценариев
             future_imgs = {}
+            self.MODEL_DATA['area_trends'] = {}
             for period in sorted(d for d in os.listdir(FUTURE_ROOT_DIR)
                                  if os.path.isdir(os.path.join(FUTURE_ROOT_DIR, d))):
                 period_dir = os.path.join(FUTURE_ROOT_DIR, period)
@@ -1171,7 +1209,8 @@ class PythonSDM:
                                     slope_data=slope_data_fut,
                                     elev_data=elev_data_fut,
                                     water_data=water_data_fut,
-                                    is_bird=(['Aves'] == self.dclass)
+                                    is_bird=(['Aves'] == self.dclass),
+                                    dclass=self.dclass
                                 )
                                 suitability_f = suitability_f * m_factor_multiplier_fut
                             except Exception as e:
@@ -1188,6 +1227,16 @@ class PythonSDM:
                         threshold_list = [0.05, 0.25, 0.5, 0.75, 0.95, self.optimal_threshold, self.optimal_threshold/2]
                         gsq, gsc = get_geotiff_square(out_path, threshold_list)
                         
+                        # Расчет тренда изменения площади
+                        current_optimal_area = self.gsq[5]
+                        future_optimal_area = gsq[5]
+                        if current_optimal_area > 0:
+                            trend_percent = round((future_optimal_area - current_optimal_area) / current_optimal_area * 100, 1)
+                        else:
+                            trend_percent = 0
+                        scenario_key = f"{period}-{scenario}"
+                        self.MODEL_DATA['area_trends'][scenario_key] = trend_percent
+
                         out_name_img = f"{period}-{scenario}.jpg"
                         out_path_img = os.path.join(self.OUTPUT_FUTURE_DIR, out_name_img)
                         print(f"Карта пригодности сохранена: {out_name_img}")
@@ -1246,11 +1295,13 @@ class PythonSDM:
             print()
 
             self.MODEL_DATA['output_paths']['futures_dir'] = self.OUTPUT_FUTURE_DIR
-            save_json(self.MODEL_DATA, self.JSON_FILENAME)
+        
+        self.timing_stats['predict_future_sec'] = round(time.time() - start_time, 2)
     
     
     # 15) Прогноз распространения вида в прошлом
     def predict_past(self): 
+        start_time = time.time()
         if self.MODEL_PAST==1 and self.IN_MODEL!='MaxEnt':
             print(f"\n-- 15. Приступаю к прогнозу прошлого ({self.IN_ID})")
             
@@ -1408,7 +1459,7 @@ class PythonSDM:
                                 transform=transform_past,
                                 observation_rows=self.rows_p, # Исходные точки присутствия (от них вид расселяется!)
                                 observation_cols=self.cols_p,
-                                buffer_km=self.M_FACTOR_CUR, # Используем текущую мобильность для всех эпох
+                                buffer_km=self.M_FACTOR_CUR, # Используем текущую мобильность для всех эпох, т.к. палео-мобильность неизвестна
                                 decay_type=self.M_FACTOR_DECAY_TYPE,
                                 decay_rate=self.M_FACTOR_DECAY_RATE,
                                 height_barrier=self.M_FACTOR_HEIGHT_BARRIER,
@@ -1491,12 +1542,14 @@ class PythonSDM:
                 print("Ошибка создания анимации: " + str(e))
                 
             print(f"\nВсе прогнозы прошлого сохранены в папку: '{self.OUTPUT_PAST_DIR}'")
+        self.timing_stats['predict_past_sec'] = round(time.time() - start_time, 2)
     
     
     
     # 16) Помесячный прогноз распространения вида
     def predict_monthly(self): 
         if self.MODEL_SEASON == 1 and 'month' in self.df.columns:
+            start_time = time.time()
             print(f"\n-- 15. Приступаю к помесячному моделированию")
             self.monthly_imgs = []
             os.makedirs("output/seasons/"+str(self.IN_ID), exist_ok=True)
@@ -1552,12 +1605,14 @@ class PythonSDM:
                         
             
             print("-- Конец помесячного моделирования")
+            self.timing_stats['predict_monthly_sec'] = round(time.time() - start_time, 2)
     
 
     # 17) Отмечает процесс как успешно завершённый в JSON
     def set_done(self):
         """Отмечает процесс как успешно завершённый в JSON."""
         if hasattr(self, 'MODEL_DATA'):
+            self.MODEL_DATA['timing_stats'] = self.timing_stats
             self.MODEL_DATA['status'] = 'done'
             self.MODEL_DATA['error'] = None
             save_json(self.MODEL_DATA, self.JSON_FILENAME)

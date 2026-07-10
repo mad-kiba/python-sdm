@@ -11,6 +11,7 @@ import rasterio
 import re
 import shutil
 from scipy.ndimage import distance_transform_edt
+from joblib import Parallel, delayed
 
 from .plots import plot_geotiff_with_osm
 from .utils import clean_nans_for_json
@@ -131,13 +132,16 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     df[LON_COL] = pd.to_numeric(df[LON_COL], errors='coerce')
     df = df.dropna(subset=[LAT_COL, LON_COL])
     
-    print(f"Осталось записей после фильтрации: {len(df)}")
+    print(f"Осталось записей после фильтрации по качеству: {len(df)}")
 
     # 2.3) фильтрация по координатам
+    initial_count_before_bbox = len(df)
     df = df[df[LAT_COL]>=IN_MIN_LAT]
     df = df[df[LAT_COL]<=IN_MAX_LAT]
     df = df[df[LON_COL]>=IN_MIN_LON]
     df = df[df[LON_COL]<=IN_MAX_LON]
+    print(f"Осталось записей после фильтрации по региону (BBox): {len(df)} (из {initial_count_before_bbox})")
+
     
     # 2.3) группировка по месяцам для таблички встреч
     print(f"-- 2.2. Группировка по месяцам ({IN_ID})")
@@ -146,7 +150,10 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     counts_dict = {}
     if 'year' in df.columns:
         year_numeric = pd.to_numeric(df['year'], errors='coerce')
+        initial_count_before_year = len(df)
         df_coord_filtered = df[year_numeric > MINIMUM_YEAR_ALLOWED].copy()
+        print(f"Осталось записей после фильтрации по году (> {MINIMUM_YEAR_ALLOWED}): {len(df_coord_filtered)} (из {initial_count_before_year})")
+
         
         month_col = ''
         if 'month' in df_coord_filtered.columns:
@@ -172,11 +179,13 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     print(f"Осталось записей финально CSV: {len(occ)}")
     
     df_coord_filtered.to_csv(CSV_FILTERED_FILENAME, index=False)
-    
-    if len(occ)==0:
-        print('Not enough points')
+
+    if total_obs_in_csv == 0:
         raise ValueError('Во входных данных нет наблюдений. Проверьте источник.')
-    
+
+    if len(occ) == 0:
+        raise ValueError('После фильтрации по координатам и дате не осталось ни одного наблюдения, подходящего для моделирования.')
+
     if len(occ)<10:
         print('Less than 10 points')
         raise ValueError(f"Недостаточно точек. Должно быть не менее 10, сейчас: {len(occ)}.")
@@ -489,18 +498,47 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
     band_paths = filtered_paths
 
     
-    # Экстраполяция предикторов на водные пространства (Nearest Neighbor)
-    print("Экстраполяция значений предикторов на акватории (Nearest Neighbor)...")
+    # --- Оптимизированная экстраполяция предикторов на водные пространства (Nearest Neighbor) ---
+    print("Экстраполяция значений предикторов на акватории (Nearest Neighbor) в параллельном режиме...")
     MAX_EXTRAPOLATE_PIXELS = 50 # Лимит экстраполяции от берега (50 точек растра, т.е. примерно 50 км при step=30")
 
-    for i in range(stack.shape[0]):
-        nan_mask = np.isnan(stack[i])
-        if nan_mask.any() and not nan_mask.all():
-            # Для каждого NaN-пикселя находим координаты ближайшего валидного пикселя (суши)
+    # Словарь для кэширования результатов distance_transform_edt для уникальных масок
+    edt_cache = {}
+
+    def process_band(band_array):
+        """Функция для обработки одного слоя (band) в отдельном потоке."""
+        nan_mask = np.isnan(band_array)
+        
+        # Если в слое нет NaN или он весь состоит из NaN, ничего не делаем
+        if not nan_mask.any() or nan_mask.all():
+            return band_array
+
+        # Используем строковое представление маски как ключ для кэша
+        mask_key = nan_mask.tobytes()
+
+        if mask_key not in edt_cache:
+            # Если для такой маски расчет еще не производился, выполняем его
             distances, indices = distance_transform_edt(nan_mask, return_distances=True, return_indices=True)
-            # Применяем экстраполяцию только к тем пикселям моря, которые близко к берегу
-            close_enough = nan_mask & (distances <= MAX_EXTRAPOLATE_PIXELS)
-            stack[i][close_enough] = stack[i][tuple(indices)][close_enough]
+            edt_cache[mask_key] = (distances, indices)
+        else:
+            # Иначе - берем готовый результат из кэша
+            distances, indices = edt_cache[mask_key]
+
+        # Применяем экстраполяцию только к тем пикселям моря, которые близко к берегу
+        close_enough = nan_mask & (distances <= MAX_EXTRAPOLATE_PIXELS)
+        
+        # Создаем копию, чтобы избежать состояния гонки при записи в исходный массив
+        processed_band = band_array.copy()
+        processed_band[close_enough] = processed_band[tuple(indices)][close_enough]
+        
+        return processed_band
+
+    # Запускаем обработку всех слоев в параллельном режиме
+    # n_jobs=-1 означает использование всех доступных ядер CPU
+    processed_bands = Parallel(n_jobs=-1)(delayed(process_band)(stack[i]) for i in range(stack.shape[0]))
+
+    # Собираем обработанные слои обратно в единый стек
+    stack = np.stack(processed_bands, axis=0)
     
     # Маска валидных пикселей: валиден, если нет NaN во всех слоях
     valid_mask = ~np.isnan(stack).any(axis=0)
