@@ -132,6 +132,7 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     df[LON_COL] = pd.to_numeric(df[LON_COL], errors='coerce')
     df = df.dropna(subset=[LAT_COL, LON_COL])
     
+    after_quality_filter = len(df)
     print(f"Осталось записей после фильтрации по качеству: {len(df)}")
 
     # 2.3) фильтрация по координатам
@@ -141,6 +142,7 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     df = df[df[LON_COL]>=IN_MIN_LON]
     df = df[df[LON_COL]<=IN_MAX_LON]
     print(f"Осталось записей после фильтрации по региону (BBox): {len(df)} (из {initial_count_before_bbox})")
+    after_bbox_filter = len(df)
 
     
     # 2.3) группировка по месяцам для таблички встреч
@@ -152,6 +154,7 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
         year_numeric = pd.to_numeric(df['year'], errors='coerce')
         initial_count_before_year = len(df)
         df_coord_filtered = df[year_numeric > MINIMUM_YEAR_ALLOWED].copy()
+        after_year_filter = len(df_coord_filtered)
         print(f"Осталось записей после фильтрации по году (> {MINIMUM_YEAR_ALLOWED}): {len(df_coord_filtered)} (из {initial_count_before_year})")
 
         
@@ -171,6 +174,7 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
                 json.dump(clean_nans_for_json(counts_dict), f, ensure_ascii=False, indent=4) # indent=4 для читаемости
     else:
         df_coord_filtered = df
+        after_year_filter = len(df_coord_filtered)
     
     # 2.4) финальные присустсвия
     print(f"-- 2.3. Финальные присутствия ({IN_ID})")
@@ -180,20 +184,26 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     
     df_coord_filtered.to_csv(CSV_FILTERED_FILENAME, index=False)
 
-    if total_obs_in_csv == 0:
-        raise ValueError('Во входных данных нет наблюдений. Проверьте источник.')
-
-    if len(occ) == 0:
-        raise ValueError('После фильтрации по координатам и дате не осталось ни одного наблюдения, подходящего для моделирования.')
-
-    if len(occ)<10:
-        print('Less than 10 points')
-        raise ValueError(f"Недостаточно точек. Должно быть не менее 10, сейчас: {len(occ)}.")
-    
-    return {
+    # Создаем словарь для возврата в любом случае
+    result = {
         'LAT_COL': LAT_COL, 'LON_COL': LON_COL, 'df': df, 'occ': occ, 'status': 'done', 
         'species': species, 'kingdom': kingdom, 'dclass': dclass, 
-        'total_obs_in_csv': total_obs_in_csv, 'monthly_counts': counts_dict}
+        'total_obs_in_csv': total_obs_in_csv, 'monthly_counts': counts_dict,
+        'after_quality_filter': after_quality_filter,
+        'after_bbox_filter': after_bbox_filter,
+        'after_year_filter': after_year_filter,
+        'error': None # По умолчанию ошибки нет
+    }
+
+    if total_obs_in_csv == 0:
+        result['error'] = 'Во входных данных нет наблюдений. Проверьте источник.'
+        return result
+
+    if len(occ) == 0:
+        result['error'] = 'После фильтрации по координатам и дате не осталось ни одного наблюдения, подходящего для моделирования.'
+        return result
+    
+    return result
 
 
 # Вспомогательная функция для приведения имен координат к единому стандарту.

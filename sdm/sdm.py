@@ -211,16 +211,13 @@ class PythonSDM:
     def load_occurrences(self): 
         print(f"\n-- 2. Загрузка наблюдений ({self.IN_ID})")
         start_time = time.time()
-
-        try:
-            ret = load_species_occurrence_data(self.IN_ID, self.IN_CSV, self.IN_CSV_ADDITIONAL,
-                                               self.CSV_FILENAME, self.CSV_FILENAME_ADD, 
-                                               self.CSV_FILTERED_FILENAME, self.MONTH_FILENAME,
-                                               self.IN_MIN_LON, self.IN_MIN_LAT, self.IN_MAX_LON, self.IN_MAX_LAT,
-                                               self.ALLOWED_COORD_UNCERTAIN, self.MINIMUM_YEAR_ALLOWED)
-        except Exception as e:
-            return handle_model_error(e, self.ERROR_FILENAME, self.MODEL_DATA, self.JSON_FILENAME, 'Ошибка обработки csv:')
         
+        ret = load_species_occurrence_data(self.IN_ID, self.IN_CSV, self.IN_CSV_ADDITIONAL,
+                                           self.CSV_FILENAME, self.CSV_FILENAME_ADD, 
+                                           self.CSV_FILTERED_FILENAME, self.MONTH_FILENAME,
+                                           self.IN_MIN_LON, self.IN_MIN_LAT, self.IN_MAX_LON, self.IN_MAX_LAT,
+                                           self.ALLOWED_COORD_UNCERTAIN, self.MINIMUM_YEAR_ALLOWED)
+
         self.LAT_COL = ret['LAT_COL']
         self.LON_COL = ret['LON_COL']
         
@@ -238,12 +235,26 @@ class PythonSDM:
         self.MODEL_DATA['occurrences']['total_obs_in_csv'] = ret.get('total_obs_in_csv', 0)
         self.MODEL_DATA['occurrences']['monthly_counts'] = ret.get('monthly_counts', {})
         self.MODEL_DATA['occurrences']['filtered_valid'] = len(self.occ)
+        self.MODEL_DATA['occurrences']['after_quality_filter'] = ret.get('after_quality_filter', 0)
+        self.MODEL_DATA['occurrences']['after_bbox_filter'] = ret.get('after_bbox_filter', 0)
+        self.MODEL_DATA['occurrences']['after_year_filter'] = ret.get('after_year_filter', 0)
 
         self.MODEL_DATA['species_info'] = {
             'kingdom': self.kingdom,
             'class': self.dclass,
             'species': self.species
         }
+        
+        # --- КЛЮЧЕВАЯ ПРОВЕРКА ---
+        # Если после всех фильтров на этапе загрузки осталось меньше 10 точек, нет смысла продолжать.
+        if len(self.occ) < 10:
+            err_msg = f"Недостаточно точек после фильтрации. Должно быть не менее 10, сейчас: {len(self.occ)}."
+            return handle_model_error(err_msg, self.ERROR_FILENAME, self.MODEL_DATA, self.JSON_FILENAME, 'Ошибка обработки наблюдений:')
+
+        # После того как все данные сохранены, проверяем наличие ошибки
+        if ret.get('error'):
+            return handle_model_error(ret['error'], self.ERROR_FILENAME, self.MODEL_DATA, self.JSON_FILENAME, 'Ошибка обработки наблюдений:')
+
         self.timing_stats['load_occurrences_sec'] = round(time.time() - start_time, 2)
     
     
@@ -360,14 +371,17 @@ class PythonSDM:
         self.pres_lons, self.pres_lats, inside = pixel_indices_to_points(rows_p, cols_p, self.transform, self.W, self.H)
         
         if month==0:
-            if 'occurrences' not in self.MODEL_DATA:
-                self.MODEL_DATA['occurrences'] = {}
             self.MODEL_DATA['occurrences']['unique_points'] = n_presence
             save_json(self.MODEL_DATA, self.JSON_FILENAME)
             
         self.n_presence = n_presence
         self.rows_p = rows_p
         self.cols_p = cols_p
+        
+        if self.n_presence < 10 and month == 0:
+            err_msg = f"Недостаточно уникальных точек для моделирования. Должно быть не менее 10, сейчас: {self.n_presence}."
+            return handle_model_error(err_msg, self.ERROR_FILENAME, self.MODEL_DATA, self.JSON_FILENAME, 'Not enough unique points')
+            
         self.timing_stats['deduplicate_data_sec'] = round(time.time() - start_time, 2)
 
 
