@@ -929,17 +929,26 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
                 total_weight = np.sum(weights)
                 if total_weight > 0 and not np.isnan(total_weight):
                     probabilities = weights / total_weight
-                    # Защита от ситуации, когда n_biased > len(candidates_random)
-                    size_to_sample = min(n_biased, len(candidates_random))
+                    
+                    # --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Проверка количества доступных кандидатов ---
+                    # Считаем, сколько у нас есть пикселей с ненулевой вероятностью
+                    num_non_zero_prob = np.count_nonzero(probabilities)
+                    
+                    # Мы не можем выбрать больше уникальных точек, чем у нас есть с ненулевой вероятностью.
+                    # Также мы не можем выбрать больше, чем изначально планировали (n_biased).
+                    size_to_sample = min(n_biased, num_non_zero_prob)
+
                     try:
-                        chosen_biased = rng.choice(candidates_random, size=size_to_sample, replace=False, p=probabilities)
+                        if size_to_sample > 0:
+                            chosen_biased = rng.choice(candidates_random, size=size_to_sample, replace=False, p=probabilities)
+                        # Если size_to_sample == 0, то chosen_biased останется пустым массивом, что корректно.
                     except ValueError as e:
-                        # Эта ошибка может возникнуть, если сумма вероятностей не равна 1.0 из-за ошибок округления.
-                        # В этом случае нормализуем еще раз.
-                        print(f"Предупреждение при взвешенном сэмплировании: {e}. Повторная нормализация вероятностей.")
+                        print(f"Предупреждение при взвешенном сэмплировании: {e}. Повторная нормализация.")
                         probabilities /= np.sum(probabilities)
-                        chosen_biased = rng.choice(candidates_random, size=size_to_sample, replace=False, p=probabilities)
-                else: # Если все веса нулевые, эта часть будет пустой
+                        if size_to_sample > 0:
+                            chosen_biased = rng.choice(candidates_random, size=size_to_sample, replace=False, p=probabilities)
+                
+                if len(chosen_biased) < n_biased:
                     n_uniform += n_biased # Добавляем недостающие точки к равномерной выборке
 
             # --- Часть 2: Равномерное случайное сэмплирование ---

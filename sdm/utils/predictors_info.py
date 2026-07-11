@@ -12,6 +12,8 @@ def get_predictors_info():
         'human_bias_Amphibia':              {'title': 'Human bias factor: амфибии', 'unit': '', 'scale': 1, 'diff': 0, 'min_val': 0, 'step': 1},
         'human_bias_Squamata':              {'title': 'Human bias factor: чешуйчатые', 'unit': '', 'scale': 1, 'diff': 0, 'min_val': 0, 'step': 1},
         'human_bias_Testudines':            {'title': 'Human bias factor: черепахи', 'unit': '', 'scale': 1, 'diff': 0, 'min_val': 0, 'step': 1},
+        'human_bias_Fungi':                 {'title': 'Human bias factor: грибы', 'unit': '', 'scale': 1, 'diff': 0, 'min_val': 0, 'step': 1},
+        'human_bias_Plantae':               {'title': 'Human bias factor: растения', 'unit': '', 'scale': 1, 'diff': 0, 'min_val': 0, 'step': 1},
 
         'wc2.1_30s_elev':                   {'title': 'WC ELEV: Высота над уровнем моря', 'unit': 'м', 'scale': 1, 'diff': 0, 'step': 1, 'min_val': -200},
         

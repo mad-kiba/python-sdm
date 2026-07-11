@@ -1,5 +1,3 @@
-# to optimize
-
 # sdm/sdm.py
 # Библиотека PythonSDM для моделирования распространения видов
 
@@ -601,8 +599,7 @@ class PythonSDM:
                     
             print(f"Сэмплировано фоновых точек + точек псевдоотсутствия: {len(self.rows_bg)}")
         except Exception as e:
-            print('Ошибка генерации фоновых точек:')
-            print(e)
+            return handle_model_error(e, self.ERROR_FILENAME, self.MODEL_DATA, self.JSON_FILENAME, 'Ошибка генерации фоновых точек:')
 
         self.timing_stats['generate_background_sec'] = round(time.time() - start_time, 2)
 
@@ -837,6 +834,12 @@ class PythonSDM:
         # --- BAM-фреймворк: Применение M-фактора (мобильность с учетом рельефа) ---
         if self.M_FACTOR_CUR != -1:
             m_factor_multiplier = np.ones_like(self.suitability) # Инициализация по умолчанию
+            # Инициализируем до try, чтобы переменные были гарантированно определены ниже
+            # (в блоке сохранения карты M-фактора), даже если загрузка слоёв здесь упадёт.
+            is_bird = (['Aves'] == self.dclass)
+            slope_data = None
+            elev_data = None
+            water_data = None
             try:
                 print(f"Применяем фактор мобильности (M-фактор): {self.M_FACTOR_CUR} км...")
                 slope_data = None
@@ -898,8 +901,6 @@ class PythonSDM:
                     water_info = self.bio_info.get('Consensus_reduced_class_12', {})
                     water_data = inverse_scale(water_scaled, water_params, water_info)
                     print("  Слой открытой воды найден! Моря станут преградой.")
-                    
-                is_bird = (['Aves'] == self.dclass)
 
                 # Генерируем матрицу множителей (0.0 ... 1.0)
                 m_factor_multiplier = apply_decay_to_points(
@@ -1038,10 +1039,10 @@ class PythonSDM:
             
             # вычисление других метрик
             y_pred = (y_prob >= self.optimal_threshold).astype(int)
-            cm = confusion_matrix(self.y_test, y_pred)
-            
-            # Безопасная распаковка на случай, если модель предсказала только один класс
-            self.TN, self.FP, self.FN, self.TP = cm.ravel() if len(cm.ravel()) == 4 else (len(self.y_test), 0, 0, 0)
+            # labels=[0, 1] фиксирует форму матрицы 2x2 даже если y_pred не содержит одного из классов
+            # (иначе confusion_matrix вернёт вырожденную 1x1 матрицу и метрики пришлось бы подделывать)
+            cm = confusion_matrix(self.y_test, y_pred, labels=[0, 1])
+            self.TN, self.FP, self.FN, self.TP = cm.ravel()
             self.kappa = cohen_kappa_score(self.y_test, y_pred)
             
             self.sensitivity = self.TP / (self.TP + self.FN) if (self.TP + self.FN) > 0 else 0
@@ -1147,16 +1148,24 @@ class PythonSDM:
         title = ''
         if self.species!='':
             title = 'Карта вероятности присутствия вида '+self.species+f" ({self.IN_ID})"
-        adtitle = f"\nМодель: {self.IN_MODEL}, шаг: {self.IN_RESOLUTION}, уник. точек: {self.n_presence}, ROC-AUC: {self.auc:.3f}";
+        adtitle = f"\nМодель: {self.IN_MODEL}, шаг: {self.IN_RESOLUTION}, уник. точек: {self.n_presence}"
         title = title + adtitle
-        
+
         if month!=0:
             title = title + ", месяц: "+str(month)
-        
-        subopt = self.optimal_threshold/2
-        adt1 = f"\nSопт = "+str(self.gsq[5])+f" кв.км (p>{self.optimal_threshold:.3f}), "
-        adt2 = f"Sсубопт = "+str(self.gsq[6])+f" кв.км (p>{subopt:.3f})"
-        title = title + adt1 + adt2
+
+        # Для периодов, где своя модель не обучалась (self.n_presence<=5), self.auc/self.gsq/
+        # self.optimal_threshold остаются от предыдущего успешного расчёта (годовой модели или
+        # другого месяца). Показывать их как метрики текущего периода было бы недостоверно,
+        # поэтому в этом случае выводим только пометку об отсутствии модели.
+        if self.n_presence > 5:
+            subopt = self.optimal_threshold/2
+            adt0 = f", ROC-AUC: {self.auc:.3f}"
+            adt1 = f"\nSопт = "+str(self.gsq[5])+f" кв.км (p>{self.optimal_threshold:.3f}), "
+            adt2 = f"Sсубопт = "+str(self.gsq[6])+f" кв.км (p>{subopt:.3f})"
+            title = title + adt0 + adt1 + adt2
+        else:
+            title = title + "\nНедостаточно наблюдений для обучения модели в этом периоде"
 
         if month == 0:
             period_label = "Наст. вр."

@@ -159,7 +159,7 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
         if 'month' in df_coord_filtered.columns:
             # MONTH_FILENAME
             MONTH_COL = 'month'
-            df_cleaned = df_coord_filtered.dropna(subset=['year', 'month'])
+            df_cleaned = df_coord_filtered.dropna(subset=['year', 'month']).copy()
             df_cleaned['year'] = df_cleaned['year'].astype(int)
             df_cleaned['month'] = df_cleaned['month'].astype(int)
             
