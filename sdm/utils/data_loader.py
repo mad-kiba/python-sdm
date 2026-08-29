@@ -119,7 +119,9 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     # 2.1) Фильтрация мусорных данных из GBIF
     print(f"-- 2.1. Фильтрация мусорных данных из GBIF ({IN_ID})")
     if 'coordinateUncertaintyInMeters' in df.columns:
-        df['coordinateUncertaintyInMeters'] = df['coordinateUncertaintyInMeters'].fillna(0).astype(float).astype(int) 
+        # errors='coerce': мусорные/нечисловые значения (например, случайно попавшие сюда
+        # таймстампы из-за сдвига колонок в исходном CSV) превращаем в NaN -> 0, а не роняем весь расчёт.
+        df['coordinateUncertaintyInMeters'] = pd.to_numeric(df['coordinateUncertaintyInMeters'], errors='coerce').fillna(0).astype(int)
         df = df[df['coordinateUncertaintyInMeters']<ALLOWED_COORD_UNCERTAIN]
         
     if 'collectionCode' in df.columns:
@@ -153,9 +155,9 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     if 'year' in df.columns:
         year_numeric = pd.to_numeric(df['year'], errors='coerce')
         initial_count_before_year = len(df)
-        df_coord_filtered = df[year_numeric > MINIMUM_YEAR_ALLOWED].copy()
+        df_coord_filtered = df[year_numeric >= MINIMUM_YEAR_ALLOWED].copy()
         after_year_filter = len(df_coord_filtered)
-        print(f"Осталось записей после фильтрации по году (> {MINIMUM_YEAR_ALLOWED}): {len(df_coord_filtered)} (из {initial_count_before_year})")
+        print(f"Осталось записей после фильтрации по году (>= {MINIMUM_YEAR_ALLOWED}): {len(df_coord_filtered)} (из {initial_count_before_year})")
 
         
         month_col = ''

@@ -10,6 +10,7 @@ import math
 import glob
 import zipfile
 import rasterio
+from datetime import datetime, timezone
 import xgboost as xgb
 import numpy as np
 import pandas as pd
@@ -165,10 +166,14 @@ class PythonSDM:
         
         self.bio_info = get_predictors_info()
 
+        self.started_at = datetime.now(timezone.utc).isoformat(timespec='seconds')
+
         self.MODEL_DATA = {
             'id': self.IN_ID,
             'status': 'working',
             'error': None,
+            'started_at': self.started_at,
+            'finished_at': None,
             'input_parameters': {
                 'min_lon': self.IN_MIN_LON, 'min_lat': self.IN_MIN_LAT,
                 'max_lon': self.IN_MAX_LON, 'max_lat': self.IN_MAX_LAT,
@@ -211,12 +216,15 @@ class PythonSDM:
     def load_occurrences(self): 
         print(f"\n-- 2. Загрузка наблюдений ({self.IN_ID})")
         start_time = time.time()
-        
-        ret = load_species_occurrence_data(self.IN_ID, self.IN_CSV, self.IN_CSV_ADDITIONAL,
-                                           self.CSV_FILENAME, self.CSV_FILENAME_ADD, 
-                                           self.CSV_FILTERED_FILENAME, self.MONTH_FILENAME,
-                                           self.IN_MIN_LON, self.IN_MIN_LAT, self.IN_MAX_LON, self.IN_MAX_LAT,
-                                           self.ALLOWED_COORD_UNCERTAIN, self.MINIMUM_YEAR_ALLOWED)
+
+        try:
+            ret = load_species_occurrence_data(self.IN_ID, self.IN_CSV, self.IN_CSV_ADDITIONAL,
+                                            self.CSV_FILENAME, self.CSV_FILENAME_ADD, 
+                                            self.CSV_FILTERED_FILENAME, self.MONTH_FILENAME,
+                                            self.IN_MIN_LON, self.IN_MIN_LAT, self.IN_MAX_LON, self.IN_MAX_LAT,
+                                            self.ALLOWED_COORD_UNCERTAIN, self.MINIMUM_YEAR_ALLOWED)
+        except Exception as e:
+            return handle_model_error(e, self.ERROR_FILENAME, self.MODEL_DATA, self.JSON_FILENAME, 'Ошибка обработки наблюдений:')
 
         self.LAT_COL = ret['LAT_COL']
         self.LON_COL = ret['LON_COL']
@@ -378,8 +386,8 @@ class PythonSDM:
         self.rows_p = rows_p
         self.cols_p = cols_p
         
-        if self.n_presence < 10 and month == 0:
-            err_msg = f"Недостаточно уникальных точек для моделирования. Должно быть не менее 10, сейчас: {self.n_presence}."
+        if self.n_presence < 5 and month == 0:
+            err_msg = f"Недостаточно уникальных точек для моделирования. Должно быть не менее 5, сейчас: {self.n_presence}."
             return handle_model_error(err_msg, self.ERROR_FILENAME, self.MODEL_DATA, self.JSON_FILENAME, 'Not enough unique points')
             
         self.timing_stats['deduplicate_data_sec'] = round(time.time() - start_time, 2)
@@ -391,10 +399,10 @@ class PythonSDM:
         print(f"\n-- 6. Генерация фоновых точек и точек псевдоотсутствия ({self.IN_ID})")
         
         # границы распространения вида, фактор мобильности по умолчанию
-        rec_mf_cur = 100
-        rec_mf_2040 = 200
-        rec_mf_2070 = 300
-        rec_mf_2100 = 400
+        rec_mf_cur = 200
+        rec_mf_2040 = 300
+        rec_mf_2070 = 400
+        rec_mf_2100 = 500
         
         # 6.1) если нужно генерировать точки псевдоотсутствия, но параметры заданы на авто
         if self.BG_PC!=100 and self.BG_DISTANCE_MIN==0:
@@ -1043,7 +1051,29 @@ class PythonSDM:
             sum_sens_spec = tpr_all + (1 - fpr_all) # TPR = sensitivity, 1 - FPR = specificity
             best_idx = np.argmax(sum_sens_spec)
             self.optimal_threshold = thresholds_all[best_idx]
-            
+
+            # --- Адаптивный "субоптимальный" порог (перцентиль предсказаний в точках присутствия) ---
+            # Заменяет прежнюю эвристику optimal_threshold/2, которая не имела статистического смысла
+            # и давала несравнимые между видами результаты. Идея (аналог Minimum/Percentile Training
+            # Presence из литературы по SDM): среди присутствий, использованных при обучении финальной
+            # модели, часть — выбросы (ошибки геопривязки, залётные особи и т.д.). Порог задаётся так,
+            # чтобы отсечь долю самых "нетипичных" (с наименьшей предсказанной пригодностью) точек:
+            #   n_presence < 100   -> Minimum Training Presence: не отсекаем ни одной точки;
+            #   100 <= n_presence <= 1000 -> отсекаем 5% точек с наименьшей пригодностью;
+            #   n_presence > 1000  -> отсекаем не более 50 точек (доля падает ниже 5%).
+            pres_probs_sorted = np.sort(self.model.predict_proba(self.X_pres)[:, 1])
+            n_pres_for_pctl = len(pres_probs_sorted)
+            if n_pres_for_pctl < 100:
+                k_exclude = 0
+            else:
+                k_exclude = min(round(n_pres_for_pctl * 0.05), 50)
+            self.suboptimal_threshold = float(pres_probs_sorted[k_exclude])
+
+            # Площадь монотонно не растёт с порогом, поэтому чтобы субоптимальная площадь никогда
+            # не оказалась меньше оптимальной, порог не должен превышать optimal_threshold.
+            if self.suboptimal_threshold > self.optimal_threshold:
+                self.suboptimal_threshold = self.optimal_threshold
+
             self.auc = roc_auc_score(self.y_test, y_prob)
             print(f"ROC AUC (holdout): {self.auc:.3f}")
             
@@ -1082,7 +1112,7 @@ class PythonSDM:
             print('Ошибка оценки качества модели:')
             print(e)
             # Устанавливаем безопасные значения, чтобы процесс не обрушился
-            self.optimal_threshold, self.auc, self.boyce_index = 0.5, 0.5, 0.0
+            self.optimal_threshold, self.suboptimal_threshold, self.auc, self.boyce_index = 0.5, 0.5, 0.5, 0.0
             self.tss, self.kappa, self.accuracy, self.pca_breadth = 0.0, 0.0, 0.0, 0.0
             self.TN, self.FP, self.FN, self.TP = 0, 0, 0, 0
             self.sensitivity, self.specificity, self.fdr, self.for_rate = 0, 0, 0, 0
@@ -1102,6 +1132,7 @@ class PythonSDM:
                 'kappa': float(self.kappa),
                 'TN': int(self.TN), 'FP': int(self.FP), 'TP': int(self.TP), 'FN': int(self.FN),
                 'optimal_threshold': float(self.optimal_threshold),
+                'suboptimal_threshold': float(self.suboptimal_threshold),
                 'sensitivity': float(self.sensitivity),
                 'specificity': float(self.specificity),
                 'fdr': float(self.fdr),
@@ -1126,7 +1157,7 @@ class PythonSDM:
             self.MODEL_DATA['feature_importances'] = feature_importances_dict
             save_json(self.MODEL_DATA, self.JSON_FILENAME)
         
-        threshold_list = [0.05, 0.25, 0.5, 0.75, 0.95, self.optimal_threshold, self.optimal_threshold/2]
+        threshold_list = [0.05, 0.25, 0.5, 0.75, 0.95, self.optimal_threshold, self.suboptimal_threshold]
         self.gsq, self.gsc = get_geotiff_square(self.OUTPUT_SUITABILITY_TIF, threshold_list)
         
         self.MODEL_DATA['current_optimal_area_km2'] = self.gsq[5]
@@ -1173,7 +1204,7 @@ class PythonSDM:
         # другого месяца). Показывать их как метрики текущего периода было бы недостоверно,
         # поэтому в этом случае выводим только пометку об отсутствии модели.
         if self.n_presence > 5:
-            subopt = self.optimal_threshold/2
+            subopt = self.suboptimal_threshold
             adt0 = f", ROC-AUC: {self.auc:.3f}"
             adt1 = f"\nSопт = "+str(self.gsq[5])+f" кв.км (p>{self.optimal_threshold:.3f}), "
             adt2 = f"Sсубопт = "+str(self.gsq[6])+f" кв.км (p>{subopt:.3f})"
@@ -1227,7 +1258,7 @@ class PythonSDM:
             save_geotiff(OUTPUT_SUITABILITY_TIF, self.suitability, self.profile)
             print(f"Карта пригодности сохранена: {OUTPUT_SUITABILITY_TIF}")
             
-            threshold_list = [0.05, 0.25, 0.5, 0.75, 0.95, self.optimal_threshold, self.optimal_threshold/2]
+            threshold_list = [0.05, 0.25, 0.5, 0.75, 0.95, self.optimal_threshold, self.suboptimal_threshold]
             gsq, gsc = get_geotiff_square(OUTPUT_SUITABILITY_TIF, threshold_list)
             
             title = ''
@@ -1235,7 +1266,7 @@ class PythonSDM:
                 title = 'Карта вероятности присутствия вида '+self.species+\
                         f" ({self.IN_ID})\nТекущий период (базовые климатические переменные)"
             
-            subopt = self.optimal_threshold/2
+            subopt = self.suboptimal_threshold
             adt1 = f"\nSопт = "+str(gsq[5])+f" кв.км (p>{self.optimal_threshold:.3f}), "
             adt2 = f"Sсубопт = "+str(gsq[6])+f" кв.км (p>{subopt:.3f})"
             title = title + adt1 + adt2
@@ -1331,7 +1362,7 @@ class PythonSDM:
                         save_geotiff(out_path, suitability_f, profile_fut)
                         print(f"Сохранено: {out_path}")
                         
-                        threshold_list = [0.05, 0.25, 0.5, 0.75, 0.95, self.optimal_threshold, self.optimal_threshold/2]
+                        threshold_list = [0.05, 0.25, 0.5, 0.75, 0.95, self.optimal_threshold, self.suboptimal_threshold]
                         gsq, gsc = get_geotiff_square(out_path, threshold_list)
                         
                         # Расчет тренда изменения площади
@@ -1583,7 +1614,7 @@ class PythonSDM:
                     save_geotiff(out_path, suitability_p, profile_past)
                     print(f"Сохранено: {out_path}")
                     
-                    threshold_list = [0.05, 0.25, 0.5, 0.75, 0.95, self.optimal_threshold, self.optimal_threshold/2]
+                    threshold_list = [0.05, 0.25, 0.5, 0.75, 0.95, self.optimal_threshold, self.suboptimal_threshold]
                     gsq, gsc = get_geotiff_square(out_path, threshold_list)
                     
                     out_name_img = f"{period_past}.jpg"
@@ -1722,4 +1753,5 @@ class PythonSDM:
             self.MODEL_DATA['timing_stats'] = self.timing_stats
             self.MODEL_DATA['status'] = 'done'
             self.MODEL_DATA['error'] = None
+            self.MODEL_DATA['finished_at'] = datetime.now(timezone.utc).isoformat(timespec='seconds')
             save_json(self.MODEL_DATA, self.JSON_FILENAME)

@@ -8,6 +8,7 @@ import math
 import os
 import json
 import pyproj
+from datetime import datetime, timezone
 from rasterio.crs import CRS
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from scipy.ndimage import distance_transform_edt
@@ -633,6 +634,7 @@ def handle_model_error(error_obj, error_filename, model_data, json_filename, con
     if model_data is not None:
         model_data['status'] = 'error'
         model_data['error'] = str(error_obj)
+        model_data['finished_at'] = datetime.now(timezone.utc).isoformat(timespec='seconds')
         save_json(model_data, json_filename)
     return {'status': 'terminated', 'error': str(error_obj), 'code': 401}
 
