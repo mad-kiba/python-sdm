@@ -1052,25 +1052,43 @@ class PythonSDM:
             best_idx = np.argmax(sum_sens_spec)
             self.optimal_threshold = thresholds_all[best_idx]
 
-            # --- Адаптивный "субоптимальный" порог (перцентиль предсказаний в точках присутствия) ---
+            # --- Адаптивный "субоптимальный" порог (перцентиль ЧЕСТНЫХ, отложенных предсказаний) ---
             # Заменяет прежнюю эвристику optimal_threshold/2, которая не имела статистического смысла
             # и давала несравнимые между видами результаты. Идея (аналог Minimum/Percentile Training
-            # Presence из литературы по SDM): среди присутствий, использованных при обучении финальной
-            # модели, часть — выбросы (ошибки геопривязки, залётные особи и т.д.). Порог задаётся так,
-            # чтобы отсечь долю самых "нетипичных" (с наименьшей предсказанной пригодностью) точек:
+            # Presence из литературы по SDM): среди присутствий вида часть — выбросы (ошибки геопривязки,
+            # залётные особи и т.д.). Порог задаётся так, чтобы отсечь долю самых "нетипичных"
+            # (с наименьшей предсказанной пригодностью) точек:
             #   n_presence < 100   -> Minimum Training Presence: не отсекаем ни одной точки;
             #   100 <= n_presence <= 1000 -> отсекаем 5% точек с наименьшей пригодностью;
             #   n_presence > 1000  -> отсекаем не более 50 точек (доля падает ниже 5%).
-            pres_probs_sorted = np.sort(self.model.predict_proba(self.X_pres)[:, 1])
-            n_pres_for_pctl = len(pres_probs_sorted)
-            if n_pres_for_pctl < 100:
-                k_exclude = 0
+            #
+            # ВАЖНО: предсказания берём у eval_model на X_test, а НЕ у финальной self.model на self.X_pres.
+            # self.model обучена на всех точках присутствия целиком, и деревья такой ёмкости
+            # (RandomForest max_depth=10, XGBoost 500 раундов) почти идеально запоминают обучающую
+            # выборку — предсказанная пригодность в собственных точках обучения искусственно завышена
+            # (у большинства точек близка к 1.0). Из-за этого перцентильный порог систематически
+            # получался выше optimal_threshold (который считается честно, на отложенных данных
+            # eval_model), и clamp ниже срабатывал практически всегда. Чтобы оба порога были
+            # на одной основе, используем предсказания eval_model для присутствий из X_test —
+            # эти точки eval_model не видела при обучении.
+            X_test_pres = self.X_test[self.y_test == 1]
+            pres_probs_sorted = np.sort(self.eval_model.predict_proba(X_test_pres)[:, 1])
+            n_test_pres = len(pres_probs_sorted)
+
+            if self.n_presence < 100:
+                exclude_fraction = 0.0
             else:
-                k_exclude = min(round(n_pres_for_pctl * 0.05), 50)
-            self.suboptimal_threshold = float(pres_probs_sorted[k_exclude])
+                exclude_fraction = min(0.05, 50 / self.n_presence)
+
+            if n_test_pres > 0:
+                k_exclude = min(int(round(exclude_fraction * n_test_pres)), n_test_pres - 1)
+                self.suboptimal_threshold = float(pres_probs_sorted[k_exclude])
+            else:
+                self.suboptimal_threshold = self.optimal_threshold
 
             # Площадь монотонно не растёт с порогом, поэтому чтобы субоптимальная площадь никогда
             # не оказалась меньше оптимальной, порог не должен превышать optimal_threshold.
+            # Теперь, когда оба порога честные и на одной основе, срабатывать это должно редко.
             if self.suboptimal_threshold > self.optimal_threshold:
                 self.suboptimal_threshold = self.optimal_threshold
 
