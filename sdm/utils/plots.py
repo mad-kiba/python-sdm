@@ -20,6 +20,51 @@ from .utils import get_predictor_stats, format_float, calculate_histogram_simila
 from .utils import read_and_to_3857, round_to_significant_figures, wrap_long_lines
 
 
+# --- Настройка тайлового кеша OSM (contextily) ---
+# Policy бесплатного тайл-сервера OSM (operations.osmfoundation.org/policies/tiles/) требует
+# кешировать тайлы и не создавать систематическую избыточную нагрузку на волонтёрский сервер.
+# Регион моделирования у большинства запусков один и тот же (фиксированный список стандартных
+# регионов), поэтому персистентный дисковый кеш почти полностью убирает повторные запросы:
+# первый же вызов add_basemap наполняет кеш, все последующие карты того же региона (в этом
+# прогоне и во всех будущих) читают тайлы с диска, без обращения к серверу OSM.
+_OSM_TILE_CACHE_DIR = os.path.join("output", "osm_tile_cache")
+os.makedirs(_OSM_TILE_CACHE_DIR, exist_ok=True)
+ctx.set_cache_dir(_OSM_TILE_CACHE_DIR)
+
+# Узнаваемый User-Agent вместо анонимного/случайного — тоже требование policy, чтобы
+# администраторы OSM могли идентифицировать приложение при необходимости, вместо того чтобы
+# банить его как неопознанного бота. Атрибут может отличаться между версиями contextily,
+# поэтому оборачиваем в try/except, чтобы отсутствие атрибута не ломало импорт модуля.
+try:
+    ctx.tile.USER_AGENT = "Qb.SDM/1.0 (+https://wingeds.world/sdm; species distribution modelling tool)"
+except AttributeError:
+    pass
+
+
+# Накладывает базовую карту OpenStreetMap на оси matplotlib (единая точка входа для всех мест,
+# где рисуется подложка OSM в этом модуле).
+def add_osm_basemap(ax, crs=None):
+    """
+    Накладывает базовую карту OpenStreetMap на оси matplotlib.
+
+    Единая точка входа для всех вызовов ctx.add_basemap в модуле: тайлы кешируются на диск
+    (см. _OSM_TILE_CACHE_DIR выше), поэтому повторные вызовы для того же региона не создают
+    новых запросов к серверу OSM. Атрибуция всегда включена — её отключение нарушает условия
+    использования тайлов OSM (лицензия ODbL).
+
+    Args:
+        ax (matplotlib.axes.Axes): Оси, на которые накладывается подложка.
+        crs: Целевая система координат осей (передаётся в ctx.add_basemap), если не EPSG:3857.
+    """
+    kwargs = {"source": ctx.providers.OpenStreetMap.Mapnik}
+    if crs is not None:
+        kwargs["crs"] = crs
+    try:
+        ctx.add_basemap(ax, **kwargs)
+    except Exception as e:
+        print(f"Не удалось добавить базовую карту OSM: {e}. Продолжаем без подложки.")
+
+
 # Строит и сохраняет график ROC-кривой (Receiver Operating Characteristic).
 def plot_roc_auc_curve(fpr, tpr, auc, auc_path, id): # постройка кривой ROC-AUC
     """
@@ -256,12 +301,7 @@ def plot_geotiff_with_osm(geotiff_path: str, output_path: str, mean: float, scal
         ax.set_aspect('equal', adjustable='box')
 
         # 4. Наложение базовой карты OSM с помощью contextily
-        #print("Загрузка контекстной карты OSM (contextily)...")
-        try:
-            ctx.add_basemap(ax, crs=target_crs, source=ctx.providers.OpenStreetMap.Mapnik, attribution=False)
-            #print("Контекстная карта OSM добавлена без искажений.")
-        except Exception as e:
-            print(f"Не удалось добавить контекстную карту OSM: {e}. Продолжаем без карты.")
+        add_osm_basemap(ax, crs=target_crs)
 
 
         # минимальное и максимальное значения
@@ -452,10 +492,7 @@ def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title='', lons=[], 
     ax.set_aspect('equal', adjustable='box')
     
     # Подложка OSM
-    ctx.add_basemap(
-        ax,
-        source=ctx.providers.OpenStreetMap.Mapnik
-    )
+    add_osm_basemap(ax)
     
     # Растровая подложка (ваш GeoTIFF) поверх OSM
     im = ax.imshow(
@@ -614,10 +651,7 @@ def draw_m_factor_map(OUTPUT_MFACTOR_TIF, OUTPUT_MFACTOR_JPG, title='', lons=[],
     ax.set_ylim(ymin_v, ymax_v)
     ax.set_aspect('equal', adjustable='box')
     
-    try:
-        ctx.add_basemap(ax, source=ctx.providers.OpenStreetMap.Mapnik)
-    except Exception as e:
-        print(f"Не удалось добавить карту OSM: {e}")
+    add_osm_basemap(ax)
     
     im = ax.imshow(
         data, extent=(xmin, xmax, ymin, ymax), origin="upper",
