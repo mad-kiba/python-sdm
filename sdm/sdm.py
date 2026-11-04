@@ -29,7 +29,7 @@ from .utils.preprocessing import clip_rasters, points_to_pixel_indices, pixel_in
 from .utils.data_loader import load_species_occurrence_data, load_environmental_predictors
 from .utils.utils import sample_background, extract_features_from_stack, inverse_scale, continuous_boyce_index
 from .utils.utils import save_geotiff, predict_suitability_for_stack, save_error, get_geotiff_square
-from .utils.utils import clean_nans_for_json, generate_combined_m_factor_map, save_json
+from .utils.utils import clean_nans_for_json, generate_combined_m_factor_map, save_json, QB_SDM_VERSION
 from .utils.utils import apply_decay_to_points, calculate_niche_breadth_pca, handle_model_error
 from .utils.plots import create_beautiful_histogram, draw_map, create_animated_gif, create_avi_from_images
 from .utils.plots import plot_roc_auc_curve, draw_m_factor_map
@@ -170,6 +170,7 @@ class PythonSDM:
 
         self.MODEL_DATA = {
             'id': self.IN_ID,
+            'qb_sdm_version': QB_SDM_VERSION,
             'status': 'working',
             'error': None,
             'started_at': self.started_at,
@@ -324,12 +325,14 @@ class PythonSDM:
                                                      self.transform, self.W, self.H)
         # Фильтруем те, что внутри растра
         rows, cols = rows[inside], cols[inside]
+        is_additional = self.occ['is_additional'].values.astype(bool)[inside]
 
         # Обязательно фильтруем точки, попавшие в зоны NoData (океан за пределами 50 пикс).
         # С новой экстраполяцией в data_loader это безопасно и спасает деревья решений от NaN-ошибок.
         valid_here = self.valid_mask[rows, cols]
         rows, cols = rows[valid_here], cols[valid_here]
-        
+        is_additional = is_additional[valid_here]
+
         print(f"Присутствий внутри валидной области: {len(rows)}")
         
         if month==0:
@@ -348,6 +351,7 @@ class PythonSDM:
         
         self.rows = rows
         self.cols = cols
+        self.is_additional = is_additional
         self.timing_stats['prepare_data_sec'] = round(time.time() - start_time, 2)
         
         
@@ -358,11 +362,14 @@ class PythonSDM:
         
         # Оставляем строго 1 точку на 1 уникальный пиксель растра
         # Spatial thinning не делаем. Метод не показал пользы, см. модели №50201, 50204, 50203
-        df_pres = pd.DataFrame({"r": self.rows, "c": self.cols})
+        df_pres = pd.DataFrame({"r": self.rows, "c": self.cols, "is_additional": self.is_additional})
         df_pixel_thinned = df_pres.drop_duplicates(subset=["r", "c"])
-        
+
         self.pres_rc = df_pixel_thinned[["r", "c"]].values
-        
+        # Основные точки идут раньше дополнительных, а drop_duplicates оставляет первую запись пикселя,
+        # поэтому True здесь только у пикселей, где есть исключительно дополнительные наблюдения.
+        self.pres_is_additional = df_pixel_thinned["is_additional"].values
+
         rows_p = self.pres_rc[:, 0]
         cols_p = self.pres_rc[:, 1]
 
@@ -376,7 +383,9 @@ class PythonSDM:
             err_msg = f"Внутри области моделирования очень мало уникальных присутствий. Должно быть не менее 5, сейчас: {n_presence}."
             return handle_model_error(err_msg, self.ERROR_FILENAME, self.MODEL_DATA, self.JSON_FILENAME, 'Not enough unique points in region')
         
-        self.pres_lons, self.pres_lats, inside = pixel_indices_to_points(rows_p, cols_p, self.transform, self.W, self.H)
+        # Координаты нужны только для отрисовки на картах: точки из IN_CSV_ADDITIONAL на картах не показываем
+        visible_on_map = ~self.pres_is_additional
+        self.pres_lons, self.pres_lats, inside = pixel_indices_to_points(rows_p[visible_on_map], cols_p[visible_on_map], self.transform, self.W, self.H)
         
         if month==0:
             self.MODEL_DATA['occurrences']['unique_points'] = n_presence
@@ -684,12 +693,11 @@ class PythonSDM:
                 scaled_data_for_plot_full = self.X_full[:, i]
                 
                 # Индивидуальная регулировка количества бинов (защита для категориальных слоев)
-                bins_num = 50
-                unique_vals = len(np.unique(scaled_data_for_plot))
-                if unique_vals > 0 and bins_num > unique_vals:
-                    bins_num = unique_vals
-                    print(f"Количество бинов для '{band_name}' уменьшено до {bins_num} по числу уникальных значений.")
-                
+                bins_num = 2 if self.bio_info.get(band_name, {}).get('kind') == 'categorical' else 50
+
+                # Без этого при ошибке построения слой получил бы статистики предыдущего слоя
+                gist = None
+
                 # Получаем параметры масштабирования для текущего предиктора
                 scale_params = self.scales_config.get(band_name)
                 
@@ -723,13 +731,14 @@ class PythonSDM:
                 # Сохраняем фигуру (оптимизировано: без bbox_inches='tight' и с dpi=100)
                 fig_single.tight_layout()
                 plt.savefig(output_filename, dpi=150) 
-                print(f"Сохранена гистограмма: {i} - {output_filename}")
+                print(f"Сохранена гистограмма: {i + 1}/{num_predictors}")
                 
             plt.close(fig_single) # Закрываем один раз после завершения всех предикторов
             
             clean_gistos_info = clean_nans_for_json(gistos_info)
+            # Файл пишется и читается в кодировке системы, а в cp1251 нет символа "²" из единиц слоёв
             with open(self.GISTO_STATS, 'a') as f:
-                json.dump(clean_gistos_info, f, ensure_ascii=False, indent=4)
+                json.dump(clean_gistos_info, f, ensure_ascii=True, indent=4)
             
             self.MODEL_DATA['histogram_stats'] = clean_gistos_info
             save_json(self.MODEL_DATA, self.JSON_FILENAME)
@@ -996,17 +1005,22 @@ class PythonSDM:
         
         if month==0:
             # Сохраним использованные точки присутствия в географических координатах:
-            if len(self.rows_p) > 0:
-                xs, ys = xy(self.transform, self.rows_p, self.cols_p, offset="center")
-                used_occ_df = pd.DataFrame({"decimalLongitude": xs, "decimalLatitude": ys})
-                used_occ_df.loc[:, 'kingdom'] = self.kingdom[0] if len(self.kingdom) > 0 else ''
-                used_occ_df.loc[:, 'class'] = self.dclass[0] if len(self.dclass) > 0 else ''
-                used_occ_df.loc[:, 'species'] = self.species
-                used_occ_df.to_csv(os.path.join(os.path.dirname(self.OUTPUT_SUITABILITY_TIF),
-                                                "used_presences_"+str(self.IN_ID)+".csv"), index=False, sep="\t")
-                self.MODEL_DATA['output_paths']['used_presences_csv'] = os.path.join(os.path.dirname(self.OUTPUT_SUITABILITY_TIF), "used_presences_"+str(self.IN_ID)+".csv")
-                print("Сохранены использованные присутствия: used_presences_"+str(self.IN_ID)+".csv")
-            
+            # Точки из основного массива и из IN_CSV_ADDITIONAL выгружаем в разные файлы.
+            for source_mask, file_prefix, path_key in [
+                (~self.pres_is_additional, "used_presences_", 'used_presences_csv'),
+                (self.pres_is_additional, "used_presences_additional_", 'used_presences_additional_csv')
+            ]:
+                if source_mask.any():
+                    xs, ys = xy(self.transform, self.rows_p[source_mask], self.cols_p[source_mask], offset="center")
+                    used_occ_df = pd.DataFrame({"decimalLongitude": xs, "decimalLatitude": ys})
+                    used_occ_df.loc[:, 'kingdom'] = self.kingdom[0] if len(self.kingdom) > 0 else ''
+                    used_occ_df.loc[:, 'class'] = self.dclass[0] if len(self.dclass) > 0 else ''
+                    used_occ_df.loc[:, 'species'] = self.species
+                    used_occ_df.to_csv(os.path.join(os.path.dirname(self.OUTPUT_SUITABILITY_TIF),
+                                                    file_prefix+str(self.IN_ID)+".csv"), index=False, sep="\t")
+                    self.MODEL_DATA['output_paths'][path_key] = os.path.join(os.path.dirname(self.OUTPUT_SUITABILITY_TIF), file_prefix+str(self.IN_ID)+".csv")
+                    print("Сохранены использованные присутствия: "+file_prefix+str(self.IN_ID)+".csv")
+
             if len(self.rows_random) > 0:
                 xs, ys = xy(self.transform, self.rows_random, self.cols_random, offset="center")
                 used_rand_df = pd.DataFrame({"decimalLongitude": xs, "decimalLatitude": ys})

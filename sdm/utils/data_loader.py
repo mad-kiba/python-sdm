@@ -70,7 +70,8 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
         
     df = detect_and_read_csv(CSV_FILENAME)
     df = standardize_coord_names(df)
-    
+    df['is_additional'] = False # пометка источника: основной массив или дополнительный
+
     # вычисляем информацию о виде
     species = ''
     if 'species' in df.columns:
@@ -96,7 +97,8 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
             
         df2 = detect_and_read_csv(CSV_FILENAME_ADD)
         df2 = standardize_coord_names(df2)
-        
+        df2['is_additional'] = True
+
         columns_df = df.columns
         columns_df2 = df2.columns
         common_columns_in_both = list(set(columns_df) & set(columns_df2))
@@ -184,7 +186,7 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     print("\n-- Обработка наблюдений")
     print(f"Осталось записей финально CSV: {len(occ)}")
     
-    df_coord_filtered.to_csv(CSV_FILTERED_FILENAME, index=False)
+    df_coord_filtered.drop(columns=['is_additional']).to_csv(CSV_FILTERED_FILENAME, index=False)
 
     # Создаем словарь для возврата в любом случае
     result = {
@@ -254,9 +256,9 @@ def load_occurrences(df, lon_col, lat_col, month_col=''):
     df.loc[:, lat_col] = df[lat_col].astype(float)
     df.loc[:, lon_col] = df[lon_col].astype(float)
     if month_col=='':
-        df = df[[lon_col, lat_col]]
+        df = df[[lon_col, lat_col, 'is_additional']]
     else:
-        df = df[[lon_col, lat_col, month_col]]
+        df = df[[lon_col, lat_col, month_col, 'is_additional']]
     df = df.dropna(subset=[lon_col, lat_col])
     # Базовая фильтрация координат
     df = df[(df[lon_col] >= -180) & (df[lon_col] <= 180) & (df[lat_col] >= -90) & (df[lat_col] <= 90)]

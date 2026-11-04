@@ -12,11 +12,21 @@ from datetime import datetime, timezone
 from rasterio.crs import CRS
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from scipy.ndimage import distance_transform_edt
-from scipy.stats import skew, kurtosis, pearsonr, spearmanr
+from scipy.stats import skew, kurtosis, spearmanr
 from scipy.spatial import ConvexHull
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
-import warnings
+
+
+# Версия расчёта в целом и версия формата histogram_stats
+QB_SDM_VERSION = 'v16'
+HISTOGRAM_STATS_VERSION = 2
+
+# Минимум точек присутствия, при котором D и относительная ширина имеют смысл
+MIN_OBS_FOR_PROFILE = 10
+# Пороги стандартизованной разницы медиан для direction
+STD_DIFF_SAME = 0.25
+STD_DIFF_STRONG = 0.75
 
 
 # Применяет пространственное затухание вокруг точек наблюдения.
@@ -376,111 +386,176 @@ def round_to_significant_figures(number: float, sig_digits: int = 4) -> float:
     #   2245 / 1 = 2245
 
     power_for_rounding = order_of_magnitude - (sig_digits - 1)
-    multiplier = 10 ** power_for_rounding
     
     # Применяем округление и возвращаем результат
-    return round(number / multiplier) * multiplier
+    # round с числом знаков, а не умножение на multiplier: иначе в JSON попадает шум вроде 0.30000000000000004
+    return round(number, -power_for_rounding)
 
 
-# Вычисляет показатель подобия двух гистограмм.
-def calculate_histogram_similarity(data_obs, data_full, bins_num=50, sig_figs=4, bins_range=None):
+# Подбирает число интервалов для D по числу точек присутствия.
+def get_similarity_bins_num(n_obs: int) -> int:
     """
-    Вычисляет показатель подобия двух распределений (гистограмм).
-    
-    Использует коэффициент корреляции Пирсона между нормализованными плотностями
-    вероятности двух наборов данных на одинаковой сетке интервалов.
-    
+    Подбирает число интервалов для индекса Шёнера: на разреженной гистограмме D систематически занижен.
+
+    Args:
+        n_obs (int): Количество точек присутствия.
+
+    Returns:
+        int: Число интервалов, min(50, max(10, 2 * sqrt(n_obs))).
+    """
+    return min(50, max(10, int(math.sqrt(n_obs) * 2)))
+
+
+# Вычисляет общий диапазон значений двух наборов данных.
+def get_common_range(data_obs, data_full):
+    """
+    Вычисляет общий диапазон двух наборов, чтобы значения присутствия вне диапазона фона не терялись молча.
+
+    Args:
+        data_obs (np.ndarray): Массив значений в точках наблюдений.
+        data_full (np.ndarray): Массив значений на всем доступном фоне.
+
+    Returns:
+        tuple: (min, max) по непустым наборам.
+    """
+    arrays = [a for a in (data_obs, data_full) if a.size > 0]
+    return min(np.min(a) for a in arrays), max(np.max(a) for a in arrays)
+
+
+# Вычисляет индекс Шёнера для двух распределений.
+def calculate_histogram_similarity(data_obs, data_full, bins_num=None, sig_figs=4, bins_range=None):
+    """
+    Вычисляет индекс Шёнера: D = 1 - 0.5 * sum(|p - q|), где p и q - доли точек по интервалам.
+
+    1 - условия в местах наблюдений распределены так же, как на всём фоне;
+    0 - распределения не пересекаются.
+
     Args:
         data_obs (np.ndarray): Массив значений в точках наблюдений.
         data_full (np.ndarray): Массив значений на всем доступном фоне (ландшафте).
-        bins_num (int, optional): Количество интервалов разбиения (бинов). По умолчанию 50.
+        bins_num (int, optional): Количество интервалов. По умолчанию подбирается по числу точек присутствия.
         sig_figs (int, optional): Количество значащих цифр для округления результата. По умолчанию 4.
-        bins_range (tuple, optional): Кортеж (min, max) для ускорения.
-        
-    Returns:
-        float: Значение от 0.0 до 1.0 (1.0 - максимальное сходство, 0.0 - сходства нет).
-    """
+        bins_range (tuple, optional): Кортеж (min, max) для ускорения. По умолчанию общий диапазон двух наборов.
 
-    if len(data_obs) == 0 or len(data_full) == 0:
-        return 0.0
-    
-    # 1. Рассчитываем гистограммы
-    # Устанавливаем общий диапазон, чтобы бины были сопоставимы
-    # Можно взять min/max из data_full, или задать общий диапазон, если известно.
-    # Предположим, что data_full содержит полный диапазон значений.
-    min_val = np.min(data_full)
-    max_val = np.max(data_full)
-    
-    # Убеждаемся, что диапазон не нулевой
+    Returns:
+        float | None: Значение от 0.0 до 1.0; None, если точек присутствия меньше MIN_OBS_FOR_PROFILE или нет фона.
+    """
+    data_obs = data_obs[~np.isnan(data_obs)]
+    data_full = data_full[~np.isnan(data_full)]
+
+    if data_obs.size < MIN_OBS_FOR_PROFILE or data_full.size == 0:
+        return None
+
+    min_val, max_val = bins_range if bins_range is not None else get_common_range(data_obs, data_full)
+
+    # Значения всех точек совпадают, и бины строить не из чего
     if min_val == max_val:
-        # Если все значения одинаковы, то гистограмма - это один пик.
-        # Сравнение будет тривиальным.
-        if np.all(data_obs == data_obs[0]) and np.all(data_full == data_full[0]):
-            return 1.0, 0.0, 0.0 # Полное сходство, корреляция 1, Чи-квадрат 0
-        else:
-            # Разные, но одномерные распределения
-            return 0.0, 0.0, 0.0 # Полное несходство, корреляция 0, Чи-квадрат большой
-            
-    # bins_range = (min_val, max_val)
-    # Если range задан, то numpy.histogram возвращает тот же диапазон бинов.
-    # Если range не задан, numpy.histogram сам определяет диапазон.
-    # Важно: для сравнения двух гистограмм, бины должны быть одинаковыми.
-    # Поэтому лучше использовать общий диапазон, который охватывает оба набора данных.
-    # Или, если range задан, но data_obs выходит за его пределы, эти значения будут игнорироваться.
-    # Лучше всего - взять min/max из data_full, если он действительно охватывает всё.
-    
-    # Используем одинаковые бины для обоих наборов данных
+        return 1.0
+
+    if bins_num is None:
+        bins_num = get_similarity_bins_num(data_obs.size)
     bins = np.linspace(min_val, max_val, bins_num + 1)
 
     counts_obs, _ = np.histogram(data_obs, bins=bins)
     counts_full, _ = np.histogram(data_full, bins=bins)
+    n_obs, n_full = counts_obs.sum(), counts_full.sum()
+    if n_obs == 0 or n_full == 0:
+        return None
 
-    # 2. Нормализация гистограмм (преобразование в плотности вероятности)
-    # Сумма всех значений гистограммы должна стать равной 1.
-    # Ширина бина (bin_width) нужна для получения истинной плотности вероятности.
-    bin_width = (max_val - min_val) / bins_num
-    
-    # Нормализуем так, чтобы сумма плотностей была равна 1
-    density_obs = counts_obs / (np.sum(counts_obs) * bin_width) if np.sum(counts_obs) > 0 else np.zeros_like(counts_obs)
-    density_full = counts_full / (np.sum(counts_full) * bin_width) if np.sum(counts_full) > 0 else np.zeros_like(counts_full)
+    # Именно доли (сумма = 1), а не плотности: иначе результат зависит от ширины бина и единиц слоя
+    p = counts_obs / n_obs
+    q = counts_full / n_full
+    schoeners_d = 1.0 - 0.5 * np.abs(p - q).sum()
+    return round_to_significant_figures(float(np.clip(schoeners_d, 0.0, 1.0)), sig_figs)
 
-    # На случай, если после нормализации остались очень малые значения (близкие к нулю),
-    # которые могут вызвать проблемы с некоторыми метриками.
-    # Можно использовать небольшое эпсилон, если это необходимо.
-    epsilon = 1e-10
-    density_obs = np.maximum(density_obs, epsilon)
-    density_full = np.maximum(density_full, epsilon)
-    
-    # 3. Вычисление метрик сходства
 
-    # А. Коэффициент корреляции Пирсона
-    # Он возвращает значение от -1 до 1. Для неотрицательных данных он будет от 0 до 1.
-    # 1 - идеальная линейная зависимость (прямая пропорциональность).
-    # 0 - отсутствие линейной зависимости.
-    try:
-        # Убираем все бины, где оба значения - epsilon (практически 0)
-        # Это поможет избежать ошибок, если одно распределение имеет больше нулевых бинов.
-        mask = (density_obs > epsilon) | (density_full > epsilon)
-        
-        if np.sum(mask) < 2: # Нужно минимум 2 точки для корреляции
-            correlation = 0.0
-        else:
-            # Проверка на нулевую дисперсию, чтобы избежать ConstantInputWarning
-            if np.std(density_obs[mask]) < 1e-8 or np.std(density_full[mask]) < 1e-8:
-                correlation = 0.0
-            else:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    corr_coeff, _ = pearsonr(density_obs[mask], density_full[mask])
-                    correlation = corr_coeff if not np.isnan(corr_coeff) else 0.0
-            
-    except Exception as e:
-        print(f"Ошибка при расчете корреляции Пирсона: {e}")
-        correlation = 0.0
+# Определяет направление отличия вида от региона по стандартизованной разнице медиан.
+def get_direction(std_diff):
+    """
+    Определяет направление отличия условий у вида от условий в регионе.
 
-    # посоветовали использовать Schoener's D для оценки похожести гистограмм
-    schoeners_d = 1.0 - 0.5 * np.sum(np.abs(density_obs - density_full))
-    return round_to_significant_figures(schoeners_d, sig_figs)
+    Args:
+        std_diff (float | None): (медиана вида - медиана региона) / стандартное отклонение региона.
+
+    Returns:
+        str | None: same, higher, lower, much_higher, much_lower; None, если std_diff не определён.
+    """
+    if std_diff is None or np.isnan(std_diff):
+        return None
+    if abs(std_diff) < STD_DIFF_SAME:
+        return 'same'
+    if abs(std_diff) < STD_DIFF_STRONG:
+        return 'higher' if std_diff > 0 else 'lower'
+    return 'much_higher' if std_diff > 0 else 'much_lower'
+
+
+# Собирает статистики профиля условий одного слоя для histogram_stats.
+def build_histogram_stats(data: np.ndarray, data_full: np.ndarray, band_info: dict, bins_range=None, sig_figs: int = 4) -> dict:
+    """
+    Собирает статистики профиля условий одного слоя в именованную структуру histogram_stats.
+
+    Args:
+        data (np.ndarray): Значения слоя в точках присутствия, в исходных единицах.
+        data_full (np.ndarray): Значения слоя по региону, в исходных единицах.
+        band_info (dict): Запись слоя из справочника предикторов (unit, kind).
+        bins_range (tuple, optional): Кортеж (min, max) для ускорения. Для категориальных слоёв не используется.
+        sig_figs (int, optional): Количество значащих цифр в результате. По умолчанию 4.
+
+    Returns:
+        dict: Статистики вида (obs), региона (region), метрики сравнения (metrics) и служебные поля.
+    """
+    if np.isnan(data).any():
+        data = data[~np.isnan(data)]
+    if np.isnan(data_full).any():
+        data_full = data_full[~np.isnan(data_full)]
+
+    kind = band_info.get('kind', 'continuous')
+    entry = {
+        'unit': band_info.get('unit'),
+        'kind': kind,
+        'n_obs': int(data.size),
+        'n_region': int(data_full.size),
+        'stats_version': HISTOGRAM_STATS_VERSION,
+    }
+
+    if kind == 'categorical':
+        # Слои one-hot: после обратного масштабирования значения могут немного отличаться от 0 и 1
+        is_obs = (data > 0.5).astype(np.float32)
+        is_full = (data_full > 0.5).astype(np.float32)
+        entry['bins'] = 2
+        entry['obs'] = {'share': round_to_significant_figures(np.mean(is_obs), sig_figs) if is_obs.size else None}
+        entry['region'] = {'share': round_to_significant_figures(np.mean(is_full), sig_figs) if is_full.size else None}
+        entry['metrics'] = {'schoener_d': calculate_histogram_similarity(is_obs, is_full, 2, sig_figs, (0.0, 1.0))}
+        return entry
+
+    raw_obs = calculate_raw_stats(data)
+    raw_region = calculate_raw_stats(data_full)
+    entry['bins'] = get_similarity_bins_num(data.size) if data.size >= MIN_OBS_FOR_PROFILE else None
+    entry['obs'] = round_stats(raw_obs, sig_figs)
+    entry['region'] = round_stats(raw_region, sig_figs)
+
+    # Сравнение считаем по неокруглённым значениям
+    std_diff = None
+    if data.size > 0 and raw_region['std'] >= 1e-9:
+        std_diff = (raw_obs['median'] - raw_region['median']) / raw_region['std']
+
+    rel_width = None
+    if data.size >= MIN_OBS_FOR_PROFILE and raw_region['width_p10_p90'] > 0:
+        rel_width = round_to_significant_figures(raw_obs['width_p10_p90'] / raw_region['width_p10_p90'], sig_figs)
+
+    obs_in_region_pct = None
+    if data.size > 0 and data_full.size > 0:
+        in_region = (data >= raw_region['p5']) & (data <= raw_region['p95'])
+        obs_in_region_pct = round_to_significant_figures(100.0 * np.mean(in_region), sig_figs)
+
+    entry['metrics'] = {
+        'schoener_d': calculate_histogram_similarity(data, data_full, entry['bins'], sig_figs, bins_range),
+        'rel_width': rel_width,
+        'std_diff': round_to_significant_figures(std_diff, sig_figs) if std_diff is not None else None,
+        'direction': get_direction(std_diff),
+        'obs_in_region_pct': obs_in_region_pct,
+    }
+    return entry
 
 
 # Рассчитывает многомерную экологическую пластичность (Niche Breadth).
@@ -530,21 +605,21 @@ def calculate_niche_breadth_pca(X_pres: np.ndarray, X_bg: np.ndarray, top_indice
         return 0.0
 
 
-# Вычисляет основные статистические показатели для набора данных.
-def get_predictor_stats(data: np.ndarray) -> dict:
+# Вычисляет неокруглённые статистические показатели для набора данных.
+def calculate_raw_stats(data: np.ndarray) -> dict:
     """
-    Вычисляет основные статистические показатели для одномерного набора данных.
-    
-    Рассчитывает среднее, медиану, минимумы/максимумы, процентили (5, 95), 
-    стандартное отклонение, асимметрию и эксцесс. Автоматически игнорирует NaN.
-    
+    Вычисляет основные статистические показатели для одномерного набора данных без округления.
+
+    Рассчитывает среднее, медиану, минимумы/максимумы, процентили (5, 10, 90, 95),
+    ширину P10-P90, стандартное отклонение, асимметрию и эксцесс. Автоматически игнорирует NaN.
+
     Args:
         data (np.ndarray): Входной массив числовых данных.
-        
+
     Returns:
         dict: Словарь со статистическими показателями.
     """
-    
+
     # Оптимизация памяти: избегаем копирования 9Мб+ массива, если он уже очищен от NaN
     if np.isnan(data).any():
         data = data[~np.isnan(data)]
@@ -552,44 +627,56 @@ def get_predictor_stats(data: np.ndarray) -> dict:
     if data.size == 0:
         return {
             'mean': np.nan, 'median': np.nan, 'min': np.nan, 'max': np.nan,
-            'p5': np.nan, 'p95': np.nan, 'width_obs': np.nan,
-            'std_dev': np.nan, 'skewness': np.nan, 'kurtosis': np.nan,
+            'p5': np.nan, 'p10': np.nan, 'p90': np.nan, 'p95': np.nan, 'width_p10_p90': np.nan,
+            'std': np.nan, 'skewness': np.nan, 'kurtosis': np.nan,
         }
-    
-    # Оптимизация: вычисляем все процентили за один проход по массиву 
-    p_vals = np.percentile(data, [5, 10, 90, 95])
-    
+
+    # Оптимизация: вычисляем все процентили за один проход по массиву
+    p_vals = np.percentile(data, [5, 10, 50, 90, 95])
+
     stats = {
-        'mean': round_to_significant_figures(np.mean(data), 4),
-        'median': round_to_significant_figures(np.median(data), 4),
-        'min': round_to_significant_figures(np.min(data), 4),
-        'max': round_to_significant_figures(np.max(data), 4),
-        'p5': round_to_significant_figures(p_vals[0], 4),
-        'p95': round_to_significant_figures(p_vals[3], 4),
-        'width_obs': round_to_significant_figures(p_vals[2] - p_vals[1], 4),
-        'std_dev': 0,
-        'skewness': 0,
-        'kurtosis': 0,
+        'mean': float(np.mean(data)),
+        'median': float(p_vals[2]),
+        'min': float(np.min(data)),
+        'max': float(np.max(data)),
+        'p5': float(p_vals[0]),
+        'p10': float(p_vals[1]),
+        'p90': float(p_vals[3]),
+        'p95': float(p_vals[4]),
+        'width_p10_p90': float(p_vals[3] - p_vals[1]),
+        'std': 0.0,
+        'skewness': 0.0,
+        'kurtosis': 0.0,
     }
-    
+
     try:
-        std_val = np.std(data)
-        stats['std_dev'] = round_to_significant_figures(std_val, 4)  # Стандартное отклонение
+        stats['std'] = float(np.std(data))  # Стандартное отклонение
     except Exception as e:
-        print('Ошибка вычисления статистики std_dev: ' + str(e))
-        std_val = 0.0
-    
+        print('Ошибка вычисления статистики std: ' + str(e))
+
     try:
-        if std_val < 1e-8:
-            stats['skewness'] = 0.0
-            stats['kurtosis'] = 0.0
-        else:
-            stats['skewness'] = round_to_significant_figures(skew(data), 4)  # Асимметрия (Skewness)
-            stats['kurtosis'] = round_to_significant_figures(kurtosis(data), 4)  # Эксцесс (Kurtosis)
+        if stats['std'] >= 1e-8:
+            stats['skewness'] = float(skew(data))  # Асимметрия (Skewness)
+            stats['kurtosis'] = float(kurtosis(data))  # Эксцесс (Kurtosis)
     except Exception as e:
         print('Ошибка вычисления статистики skew/kurtosis: ' + str(e))
-    
+
     return stats
+
+
+# Округляет все показатели словаря статистик.
+def round_stats(stats: dict, sig_figs: int = 4) -> dict:
+    """
+    Округляет все показатели словаря статистик до заданного количества значащих цифр.
+
+    Args:
+        stats (dict): Словарь статистик.
+        sig_figs (int, optional): Количество значащих цифр. По умолчанию 4.
+
+    Returns:
+        dict: Словарь с округлёнными значениями.
+    """
+    return {k: round_to_significant_figures(v, sig_figs) for k, v in stats.items()}
 
 
 # Форматирует число с плавающей точкой для отображения (убирает лишние нули).

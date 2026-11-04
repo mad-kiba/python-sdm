@@ -16,7 +16,7 @@ import matplotlib.colors as mcolors
 from PIL import Image
 import warnings
 
-from .utils import get_predictor_stats, format_float, calculate_histogram_similarity, get_geotiff_square
+from .utils import build_histogram_stats, format_float, get_common_range, get_geotiff_square
 from .utils import read_and_to_3857, round_to_significant_figures, wrap_long_lines
 
 
@@ -396,7 +396,7 @@ def plot_geotiff_with_osm(geotiff_path: str, output_path: str, mean: float, scal
         ax.set_ylabel('Широта (°)')
         pred_title = band_info.get('title', band)
         unit = band_info.get('unit', '')
-        if unit:
+        if unit and unit != '—':
             pred_title = f"{pred_title}, {unit}"
         ax.set_title(pred_title, fontsize=8)
         ax.grid(True, linestyle='--', alpha=0.6)
@@ -707,13 +707,13 @@ def draw_m_factor_map(OUTPUT_MFACTOR_TIF, OUTPUT_MFACTOR_JPG, title='', lons=[],
     plt.close(fig)
 
 # Рисует гистограмму на заданных осях.
-def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, bins_num: int, data_full: np.ndarray, bio_info, title = ''):
+def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, bins_num: int, data_full: np.ndarray, bio_info, title = '', with_stats_box: bool = False):
     """
     Строит сравнительную гистограмму распределения значений предиктора.
 
     Сравнивает распределение климатического фактора в точках присутствия вида (data)
     с общим распределением этого фактора на всем доступном фоне/ландшафте (data_full).
-    Вычисляет и наносит на график статистические метрики (среднее, медиану, процентили).
+    Вычисляет статистические метрики и наносит на график среднее, медиану и процентили.
 
     Args:
         ax (plt.Axes): Объект осей Matplotlib для отрисовки графика.
@@ -723,15 +723,17 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
         data_full (np.ndarray): Массив значений предиктора на всем фоне (valid_mask).
         bio_info (dict): Справочник метаданных предикторов (единицы измерения, лимиты).
         title (str, optional): Дополнительный текст для заголовка графика. По умолчанию ''.
+        with_stats_box (bool, optional): Наносить ли на график блок со статистиками. По умолчанию False.
 
     Returns:
-        tuple: (stats_data, stats_predictor) - два словаря со статистическими показателями для наблюдений и фона.
+        dict | None: Статистики слоя в формате histogram_stats (см. build_histogram_stats).
     """
-    
+
     band_info = bio_info.get(band_name) or {}
     min_val = band_info.get('min_val')
     max_val = band_info.get('max_val')
-    
+    is_categorical = band_info.get('kind') == 'categorical'
+
     # Оптимизация памяти и скорости: объединяем фильтры в одну логическую маску.
     # Это позволяет не копировать массивы элементов в памяти 3 раза подряд.
     mask_data = ~np.isnan(data)
@@ -740,74 +742,49 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
     if max_val is not None:
         mask_data &= (data <= max_val)
     data = data[mask_data]
-    
+
     mask_full = ~np.isnan(data_full)
     if min_val is not None:
         mask_full &= (data_full >= min_val)
     if max_val is not None:
         mask_full &= (data_full <= max_val)
     data_full = data_full[mask_full]
-    
-    # Определяем диапазон бинов один раз ЗДЕСЬ, чтобы не сканировать миллионы точек 
+
+    if data.size == 0 and data_full.size == 0:
+        ax.set_title("Нет данных для отображения")
+        return None
+
+    # Определяем диапазон бинов один раз ЗДЕСЬ, чтобы не сканировать миллионы точек
     # повторно внутри функций similarity и np.histogram
-    if data.size > 0 or data_full.size > 0:
-        bins_range = (np.min(data_full), np.max(data_full))
+    if is_categorical:
+        data = (data > 0.5).astype(np.float32)
+        data_full = (data_full > 0.5).astype(np.float32)
+        bins_range = (0.0, 1.0)
+    else:
+        bins_range = get_common_range(data, data_full)
+        # Защита от ValueError, если все значения одинаковы (min == max)
         if bins_range[0] == bins_range[1]:
             val = bins_range[0]
             bins_range = (val - 0.5, val + 0.5)
-    else:
-        ax.set_title("Нет данных для отображения")
-        return
-        
-    stats_data = {}
-    stats_predictor = {}
+
+    stats_entry = None
     try:
-        # --- Статистика и гистограмма для данных наблюдений (data) ---
-        stats_data = get_predictor_stats(data)
-        stats_predictor = get_predictor_stats(data_full)
-        stats_data['similarity'] = calculate_histogram_similarity(data, data_full, bins_num, bins_range=bins_range)
+        stats_entry = build_histogram_stats(data, data_full, band_info, bins_range=bins_range)
     except Exception as e:
         print('Ошибка вычисления стат показателей диаграм:')
         print(e)
-    
-    #print(stats_data)
-    stats_data['unit'] = band_info.get('unit')
-    stats_data['scale'] = band_info.get('scale')
-    stats_data['min_val'] = band_info.get('min_val')
-    stats_data['max_val'] = band_info.get('max_val')
-    stats_data['test'] = 'tests'
-    
-    
-    try:
-        # Определяем диапазон бинов.
-        # Сначала убедимся, что data_full имеет хотя бы данные для расчета диапазона,
-        # если data пустая.
-        if data.size > 0 or data_full.size > 0:
-            # Диапазон определяем мгновенно (без построения гистограмм)
-            bins_range = (np.min(data_full), np.max(data_full))
-            # Защита от ValueError, если весь растр состоит из одного значения (min == max)
-            if bins_range[0] == bins_range[1]:
-                val = bins_range[0]
-                bins_range = (val - 0.5, val + 0.5)
-        else:
-            # Если оба массива пусты, не можем построить гистограмму.
-            # Можно вывести сообщение или просто выйти.
-            ax.set_title("Нет данных для отображения")
-            return
-        # --- Расчет counts и нормализация для data ---
-        if data.size > 0:
-            counts_data, bin_edges_data = np.histogram(data, bins=bins_num, range=bins_range) # Используем общий bins_range
-            max_count_data = counts_data.max() if counts_data.size > 0 else 0
-            normalized_counts_data = counts_data / max_count_data if max_count_data > 0 else np.zeros_like(counts_data)
-        else:
-            normalized_counts_data = np.zeros(bins_num) # Если data пустая, все нормализованные counts = 0
-            # Создаем пустые границы нужного размера, чтобы графики не ломались (shape mismatch)
-            bin_edges_data = np.linspace(bins_range[0], bins_range[1], bins_num + 1)
-    except Exception as e:
-        print('Ошибка вычисления bins_range')
-        print(e)
-    
-    
+
+    # --- Расчет counts и нормализация для data ---
+    if data.size > 0:
+        counts_data, bin_edges_data = np.histogram(data, bins=bins_num, range=bins_range) # Используем общий bins_range
+        max_count_data = counts_data.max() if counts_data.size > 0 else 0
+        normalized_counts_data = counts_data / max_count_data if max_count_data > 0 else np.zeros_like(counts_data)
+    else:
+        normalized_counts_data = np.zeros(bins_num) # Если data пустая, все нормализованные counts = 0
+        # Создаем пустые границы нужного размера, чтобы графики не ломались (shape mismatch)
+        bin_edges_data = np.linspace(bins_range[0], bins_range[1], bins_num + 1)
+
+
     # --- Расчет counts и нормализация для data_full ---
     counts_full, bin_edges_full = np.histogram(data_full, bins=bins_num, range=bins_range) # Используем общий bins_range
     max_count_full = counts_full.max() if counts_full.size > 0 else 0
@@ -843,15 +820,18 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
         
         # --- Добавляем линии для основных статистик (для data) ---
         # Линии рисуем по исходным данным (data), а не по нормализованным counts.
-        ax.axvline(stats_data['mean'], color='#FF5252', linestyle='--', linewidth=1.5, label=f'Среднее ({format_float(stats_data["mean"])})')
-        ax.axvline(stats_data['median'], color='#4CAF50', linestyle='-', linewidth=1.5, label=f'Медиана ({format_float(stats_data["median"])})')
-        ax.axvline(stats_data['p5'], color='#FFB300', linestyle=':', linewidth=1.2)
-        ax.axvline(stats_data['p95'], color='#FFB300', linestyle=':', linewidth=1.2, label='5%/95%')
-        
+        # У категориальных слоёв есть только доли, поэтому линий нет.
+        if stats_entry and not is_categorical:
+            stats_data = stats_entry['obs']
+            ax.axvline(stats_data['mean'], color='#FF5252', linestyle='--', linewidth=1.5, label=f'Среднее ({format_float(stats_data["mean"])})')
+            ax.axvline(stats_data['median'], color='#4CAF50', linestyle='-', linewidth=1.5, label=f'Медиана ({format_float(stats_data["median"])})')
+            ax.axvline(stats_data['p5'], color='#FFB300', linestyle=':', linewidth=1.2)
+            ax.axvline(stats_data['p95'], color='#FFB300', linestyle=':', linewidth=1.2, label='5%/95%')
+
         # --- Заголовок и подписи осей ---
         pred_title = band_info.get('title', band_name)
         unit = band_info.get('unit', '')
-        if unit:
+        if unit and unit != '—':
             pred_title = f"{pred_title}, {unit}"
         axtitle = "Гистограмма отклика для предиктора:\n"+wrap_long_lines(pred_title, 100)
         if (title != ''):
@@ -874,12 +854,13 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
         ax.grid(axis='x', linestyle='--', alpha=0.1)
     
         # --- Добавляем информацию о статистике (для data) ---
-        y_pos_for_stats_data_adjusted = 0.95
-        try:
-            add_stats_to_plot(ax, stats_data, stats_predictor, y_pos=y_pos_for_stats_data_adjusted, y_max_overall=total_y_max_normalized)
-        except Exception as e:
-            print("Ошибка нанесения статистических признаков: " + str(e))
-    
+        if with_stats_box and stats_entry:
+            y_pos_for_stats_data_adjusted = 0.95
+            try:
+                add_stats_to_plot(ax, stats_entry, y_pos=y_pos_for_stats_data_adjusted, y_max_overall=total_y_max_normalized)
+            except Exception as e:
+                print("Ошибка нанесения статистических признаков: " + str(e))
+
         # --- Легенда ---
         handles, labels = ax.get_legend_handles_labels()
         by_label = dict(zip(labels, handles))
@@ -891,11 +872,11 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
     except Exception as e:
         print("Ошибка построения гистограммы: " + str(e))
     
-    return stats_data, stats_predictor
+    return stats_entry
 
 
 # Добавляет статистическую информацию на оси гистограммы.
-def add_stats_to_plot(ax: plt.Axes, stats: dict, stats_pred: dict, y_pos: float, y_max_overall: float = None):
+def add_stats_to_plot(ax: plt.Axes, stats_entry: dict, y_pos: float, y_max_overall: float = None):
     """
     Добавляет статистическую информацию на оси гистограммы.
     Учитывает y_max_overall для корректного позиционирования текста,
@@ -903,7 +884,7 @@ def add_stats_to_plot(ax: plt.Axes, stats: dict, stats_pred: dict, y_pos: float,
 
     Args:
         ax (plt.Axes): Объект осей Matplotlib.
-        stats (dict): Словарь со статистиками ('min', 'p5', 'median', 'mean', 'p95', 'max').
+        stats_entry (dict): Статистики слоя в формате histogram_stats (см. build_histogram_stats).
         y_pos (float): Относительная позиция текста по оси Y (доля от 0 до 1)
                        при использовании transform=ax.transAxes.
                        Это значение теперь используется напрямую для позиционирования.
@@ -913,52 +894,48 @@ def add_stats_to_plot(ax: plt.Axes, stats: dict, stats_pred: dict, y_pos: float,
                                           Оставляем для совместимости с сигнатурой вызова.
     """
 
-    # Проверяем, что словарь stats содержит все ожидаемые ключи
-    required_keys = ['min', 'p5', 'median', 'mean', 'p95', 'max', 'std_dev', 'skewness', 'kurtosis', 'similarity']
-    for key in required_keys:
-        if key not in stats:
-            stats[key] = np.nan # Устанавливаем NaN, если ключ отсутствует
-            
-    try:
-        width_pred = stats_pred.get('width_obs')
-        if width_pred and width_pred > 0:
-            broad = round_to_significant_figures(stats.get('width_obs') / width_pred, 2)
-        else:
-            broad = 0.0
-    except Exception as e:
-        print("Ошибка вычисления относительной ширины: " + str(e))
-        broad = 0
-    
-    broad = round(broad, 2)
-    simil = round(stats.get('similarity'), 2)
+    # None - штатное значение: например, D при малом числе точек присутствия
+    def fmt(value):
+        return 'н/д' if value is None else format_float(value)
 
-    stats_text = (
-        f"  Наблюдения:\n"
-        f"  Min: {format_float(stats.get('min'))}\n" # Используем .get() для безопасности
-        f"  P5:  {format_float(stats.get('p5'))}\n"
-        f"  Med: {format_float(stats.get('median'))}\n"
-        f"  Mean:{format_float(stats.get('mean'))}\n"
-        f"  P95: {format_float(stats.get('p95'))}\n"
-        f"  Max: {format_float(stats.get('max'))}\n"
-        f"  StDev: {format_float(stats.get('std_dev'))}\n"
-        f"  Ass: {format_float(stats.get('skewness'))}\n"
-        f"  Exc: {format_float(stats.get('kurtosis'))}\n\n"
-        
-        f"  Весь слой:\n"
-        f"  Min: {format_float(stats_pred.get('min'))}\n" # Используем .get() для безопасности
-        f"  P5:  {format_float(stats_pred.get('p5'))}\n"
-        f"  Med: {format_float(stats_pred.get('median'))}\n"
-        f"  Mean:{format_float(stats_pred.get('mean'))}\n"
-        f"  P95: {format_float(stats_pred.get('p95'))}\n"
-        f"  Max: {format_float(stats_pred.get('max'))}\n"
-        f"  StDev: {format_float(stats_pred.get('std_dev'))}\n"
-        f"  Ass: {format_float(stats_pred.get('skewness'))}\n"
-        f"  Exc: {format_float(stats_pred.get('kurtosis'))}\n\n"
-        
-        f"  Сравнение:\n"
-        f"  Broad: {broad}\n"
-        f"  Sch.D: {simil}"
-    )
+    stats = stats_entry['obs']
+    stats_pred = stats_entry['region']
+    metrics = stats_entry['metrics']
+
+    if stats_entry['kind'] == 'categorical':
+        stats_text = (
+            f"  Доля наблюдений: {fmt(stats['share'])}\n"
+            f"  Доля региона: {fmt(stats_pred['share'])}\n"
+            f"  D Шёнера: {fmt(metrics['schoener_d'])}"
+        )
+    else:
+        stats_text = (
+            f"  Наблюдения:\n"
+            f"  Мин: {fmt(stats['min'])}\n"
+            f"  P5:  {fmt(stats['p5'])}\n"
+            f"  Медиана: {fmt(stats['median'])}\n"
+            f"  Среднее: {fmt(stats['mean'])}\n"
+            f"  P95: {fmt(stats['p95'])}\n"
+            f"  Макс: {fmt(stats['max'])}\n"
+            f"  Ст. откл.: {fmt(stats['std'])}\n"
+            f"  Асимметрия: {fmt(stats['skewness'])}\n"
+            f"  Эксцесс: {fmt(stats['kurtosis'])}\n\n"
+
+            f"  Весь слой:\n"
+            f"  Мин: {fmt(stats_pred['min'])}\n"
+            f"  P5:  {fmt(stats_pred['p5'])}\n"
+            f"  Медиана: {fmt(stats_pred['median'])}\n"
+            f"  Среднее: {fmt(stats_pred['mean'])}\n"
+            f"  P95: {fmt(stats_pred['p95'])}\n"
+            f"  Макс: {fmt(stats_pred['max'])}\n"
+            f"  Ст. откл.: {fmt(stats_pred['std'])}\n"
+            f"  Асимметрия: {fmt(stats_pred['skewness'])}\n"
+            f"  Эксцесс: {fmt(stats_pred['kurtosis'])}\n\n"
+
+            f"  Сравнение:\n"
+            f"  Отн. ширина (P10-P90): {fmt(metrics['rel_width'])}\n"
+            f"  D Шёнера: {fmt(metrics['schoener_d'])}"
+        )
 
     # Помещаем текст справа от гистограммы.
     # transform=ax.transAxes означает, что координаты (1.02, y_pos)
