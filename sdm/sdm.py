@@ -737,7 +737,8 @@ class PythonSDM:
             
             clean_gistos_info = clean_nans_for_json(gistos_info)
             # Файл пишется и читается в кодировке системы, а в cp1251 нет символа "²" из единиц слоёв
-            with open(self.GISTO_STATS, 'a') as f:
+            # Режим 'w': при повторном расчёте с тем же ID дозапись дала бы два JSON подряд в одном файле
+            with open(self.GISTO_STATS, 'w') as f:
                 json.dump(clean_gistos_info, f, ensure_ascii=True, indent=4)
             
             self.MODEL_DATA['histogram_stats'] = clean_gistos_info
