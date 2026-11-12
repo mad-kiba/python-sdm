@@ -12,15 +12,15 @@ from sdm import PythonSDM
 # устанавливаем параметры для запуска модели
 config = {
         'IN_ID': 1,
-        #'IN_CSV': 'data/Ommatotriton_Ommatotriton_vittatus.csv',
+        #'IN_CSV': 'data/Corvus_Corvus_cornix.csv',
         'IN_CSV': 'data/falco_peregrinus.csv',
         'IN_CSV_ADDITIONAL': '',
         'PREDICTORS': 'all', # используем все доступные предикторы
-        'IN_MIN_LAT': 42.0,
-        'IN_MIN_LON': 35.0,
-        'IN_MAX_LAT': 93.0,
-        'IN_MAX_LON': 59.0,
-        'IN_RESOLUTION': '5m',
+        'IN_MIN_LAT': 50.0,
+        'IN_MIN_LON': 78.0,
+        'IN_MAX_LAT': 56.0,
+        'IN_MAX_LON': 90.0,
+        'IN_RESOLUTION': '30s',
         'MODEL_FUTURE': 0, # 0 = не прогнозируем будущее
         'MODEL_SEASON': 0, # 0 = не делаем помесячный прогноз
         'MODEL_PAST': 0, # 0 = не прогнозируем прошлое
@@ -35,6 +35,12 @@ config = {
         'M_FACTOR_DECAY_TYPE': 'sigmoid',
         'M_FACTOR_DECAY_RATE': 0.1,
         'M_FACTOR_HEIGHT_BARRIER': 500,
+        'USE_BIAS_LAYER_FOR_BG': 1,
+        'BIAS_SAMPLING_STRENGTH': 0.7,
+        'M_FACTOR_CUR': -1,
+        'M_FACTOR_2040': -1,
+        'M_FACTOR_2070': -1,
+        'M_FACTOR_2100': -1,
         'SCENARIOS': 'all',
         'JOBS': {}
 }

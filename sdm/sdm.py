@@ -113,9 +113,6 @@ class PythonSDM:
         self.OUTPUT_SEASONS_DIR = os.path.join(self.OUTPUT_SEASONS_DIR, str(self.IN_ID))
         
         self.RAW_RASTER_DIR = "input_predictors"
-        # Параметры для bias correction, которые могут быть переопределены из config
-        self.USE_BIAS_LAYER_FOR_MFACTOR = getattr(self, 'USE_BIAS_LAYER_FOR_MFACTOR', 1)
-        self.MFACTOR_BIAS_STRENGTH = getattr(self, 'MFACTOR_BIAS_STRENGTH', 2.0)
         self.PREDICTORS_JPEGS = "output/predictors_jpegs"
         
         
@@ -186,8 +183,8 @@ class PythonSDM:
             'bias_correction': {
                 'use_for_bg_sampling': self.USE_BIAS_LAYER_FOR_BG,
                 'bg_sampling_strength': self.BIAS_SAMPLING_STRENGTH,
-                'use_for_m_factor': self.USE_BIAS_LAYER_FOR_MFACTOR,
-                'm_factor_strength': self.MFACTOR_BIAS_STRENGTH
+                'bg_layer': None,
+                'num_biased_bg': 0
             },
             'output_paths': {
                 'suitability_tif': self.OUTPUT_SUITABILITY_TIF,
@@ -566,7 +563,8 @@ class PythonSDM:
                 if bias_layer_path:
                     print(f"Загрузка слоя предвзятости: {bias_layer_path}")
                     with rasterio.open(bias_layer_path) as src:
-                        bias_weights = src.read(1)
+                        # Пропуски считаем отсутствием наблюдений: при обрезке вне покрытия слоя там появляется nodata
+                        bias_weights = src.read(1, masked=True).filled(0)
                     # Загружаем параметры масштабирования для этого слоя
                     if bias_layer_name and self.scales_config.get(bias_layer_name):
                         bias_scale_params = self.scales_config[bias_layer_name]
@@ -599,7 +597,7 @@ class PythonSDM:
                 n_bg = min(self.MAX_BG, int(self.BG_MULT * self.n_presence))
             
             
-            self.rows_bg, self.cols_bg, self.rows_random, self.cols_random, self.rows_buffer, self.cols_buffer = sample_background(self.valid_mask,
+            self.rows_bg, self.cols_bg, self.rows_random, self.cols_random, self.rows_buffer, self.cols_buffer, num_biased_bg = sample_background(self.valid_mask,
                                                            set(map(tuple, self.pres_rc)), n_bg,
                                                            rng, self.BG_PC, self.BG_DISTANCE_MIN, self.BG_DISTANCE_MAX,
                                                            bias_weights_map=bias_weights, bias_sampling_strength=self.BIAS_SAMPLING_STRENGTH,
@@ -626,6 +624,10 @@ class PythonSDM:
                     'num_buffer_bg': len(self.rows_buffer),
                     'total_bg': len(self.rows_bg)
                 }
+                # Что применилось на деле: слоя может не оказаться, даже если поправка запрошена
+                layer_used = bias_weights is not None and self.BIAS_SAMPLING_STRENGTH > 0
+                self.MODEL_DATA['bias_correction']['bg_layer'] = bias_layer_name if layer_used else None
+                self.MODEL_DATA['bias_correction']['num_biased_bg'] = num_biased_bg
                 save_json(self.MODEL_DATA, self.JSON_FILENAME)
                     
             print(f"Сэмплировано фоновых точек + точек псевдоотсутствия: {len(self.rows_bg)}")
@@ -849,6 +851,39 @@ class PythonSDM:
                 raise ValueError(f"Неизвестный или неподдерживаемый тип алгоритма: '{self.IN_MODEL}'")
         except Exception as e:
             return handle_model_error(e, self.ERROR_FILENAME, self.MODEL_DATA, self.JSON_FILENAME, 'Ошибка обучения финальной модели')
+
+        # Параметры боевой модели (self.model) для отображения на фронте и воспроизводимости расчёта
+        if self.IN_MODEL == 'RandomForest':
+            self.MODEL_DATA['model_params'] = {
+                'algorithm': 'RandomForest',
+                'n_estimators': 500,
+                'max_depth': 10,
+                'min_samples_leaf': rf_min_leaf,  # зависит от n_presence, см. комментарий выше
+                'class_weight': 'balanced_subsample',
+                'random_seed': self.RANDOM_SEED,
+            }
+        elif self.IN_MODEL == 'XGBoost':
+            self.MODEL_DATA['model_params'] = {
+                'algorithm': 'XGBoost',
+                'n_estimators': 500,
+                'learning_rate': 0.05,
+                'max_depth': 5,
+                'subsample': 0.8,
+                'colsample_bytree': 0.8,
+                'scale_pos_weight': round(float(spw_final), 4),  # соотношение фон/присутствия на всех данных
+                'random_seed': self.RANDOM_SEED,
+            }
+        elif self.IN_MODEL == 'MaxEnt':
+            self.MODEL_DATA['model_params'] = {
+                'algorithm': 'MaxEnt',
+                'features': 'linear + quadratic' if self.model.add_quadratic else 'linear',
+                'reg_lambda': self.model.reg_lambda,
+                'maxiter': 500,
+                'tol': 1e-5,
+                'n_features_expanded': int(self.model.X_train_ext.shape[1]),
+            }
+        save_json(self.MODEL_DATA, self.JSON_FILENAME)
+
         self.timing_stats['train_model_sec'] = round(time.time() - start_time, 2)
 
 
@@ -894,36 +929,6 @@ class PythonSDM:
                     elev_data = inverse_scale(elev_scaled, elev_params, elev_info)
                     print("  Слой высоты найден! Горы будут физическим барьером.")
 
-                bias_data_m = None
-                if self.USE_BIAS_LAYER_FOR_MFACTOR == 1:
-                    print("  Активирован учет предвзятости наблюдений для M-фактора.")
-                    bias_layer_path_m = None
-                    bias_layer_name_m = None
-                    
-                    if self.dclass and self.dclass[0]:
-                        class_specific_bias_filename = f"human_bias_{self.dclass[0]}.tif"
-                        bias_layer_name_m = os.path.splitext(class_specific_bias_filename)[0]
-                        potential_path_static = os.path.join(self.RASTER_DIR, "static", class_specific_bias_filename)
-                        if os.path.exists(potential_path_static):
-                            bias_layer_path_m = potential_path_static
-
-                    if not bias_layer_path_m:
-                        general_bias_filename = "human_bias_alls.tif"
-                        bias_layer_name_m = os.path.splitext(general_bias_filename)[0]
-                        potential_path_static = os.path.join(self.RASTER_DIR, "static", general_bias_filename)
-                        if os.path.exists(potential_path_static):
-                            bias_layer_path_m = potential_path_static
-
-                    if bias_layer_path_m:
-                        print(f"  Загрузка слоя предвзятости для M-фактора: {bias_layer_path_m}")
-                        with rasterio.open(bias_layer_path_m) as src:
-                            bias_weights_m = src.read(1)
-                        if bias_layer_name_m and self.scales_config.get(bias_layer_name_m):
-                            bias_scale_params_m = self.scales_config[bias_layer_name_m]
-                            bias_data_m = inverse_scale(bias_weights_m, bias_scale_params_m, {})
-                        else:
-                            bias_data_m = bias_weights_m # Используем как есть, если нет параметров
-
                     
                 water_data = None
                 if 'Consensus_reduced_class_12' in self.band_names:
@@ -948,8 +953,7 @@ class PythonSDM:
                     elev_data=elev_data,
                     water_data=water_data,
                     is_bird=is_bird,
-                    dclass=self.dclass,
-                    bias_data=bias_data_m
+                    dclass=self.dclass
                 )
                 
                 # Умножаем оригинальную пригодность (Абиотика) на M-фактор (Мобильность)

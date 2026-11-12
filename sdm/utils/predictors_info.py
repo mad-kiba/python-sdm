@@ -286,12 +286,12 @@ def get_predictors_info():
         'SG_cec_60-100cm_mean_1000':        {'title': 'SoilGrid: Ёмкость катионного обмена почвы (ph=7) на глубине 60-100 см', 'unit': 'смоль/кг', 'scale': 10, 'diff': 0, 'step': 1, 'min_val': 0},
         'SG_cec_100-200cm_mean_1000':       {'title': 'SoilGrid: Ёмкость катионного обмена почвы (ph=7) на глубине 100-200 см', 'unit': 'смоль/кг', 'scale': 10, 'diff': 0, 'step': 1, 'min_val': 0},
         
-        'SG_cfvo_0-5cm_mean_1000':          {'title': 'SoilGrid: Объёмная доля крупных частиц на глубине 0-5 см', 'unit': '%', 'scale': 100, 'diff': 0, 'min_val': 0},
-        'SG_cfvo_5-15cm_mean_1000':         {'title': 'SoilGrid: Объёмная доля крупных частиц на глубине 5-15 см', 'unit': '%', 'scale': 100, 'diff': 0, 'min_val': 0},
-        'SG_cfvo_15-30cm_mean_1000':        {'title': 'SoilGrid: Объёмная доля крупных частиц на глубине 15-30 см', 'unit': '%', 'scale': 100, 'diff': 0, 'min_val': 0},
-        'SG_cfvo_30-60cm_mean_1000':        {'title': 'SoilGrid: Объёмная доля крупных частиц на глубине 30-60 см', 'unit': '%', 'scale': 100, 'diff': 0, 'min_val': 0},
-        'SG_cfvo_60-100cm_mean_1000':       {'title': 'SoilGrid: Объёмная доля крупных частиц на глубине 60-100 см', 'unit': '%', 'scale': 100, 'diff': 0, 'min_val': 0},
-        'SG_cfvo_100-200cm_mean_1000':      {'title': 'SoilGrid: Объёмная доля крупных частиц на глубине 100-200 см', 'unit': '%', 'scale': 100, 'diff': 0, 'min_val': 0},
+        'SG_cfvo_0-5cm_mean_1000':          {'title': 'SoilGrid: Объёмная доля крупных частиц на глубине 0-5 см', 'unit': '%', 'scale': 10, 'diff': 0, 'min_val': 0},
+        'SG_cfvo_5-15cm_mean_1000':         {'title': 'SoilGrid: Объёмная доля крупных частиц на глубине 5-15 см', 'unit': '%', 'scale': 10, 'diff': 0, 'min_val': 0},
+        'SG_cfvo_15-30cm_mean_1000':        {'title': 'SoilGrid: Объёмная доля крупных частиц на глубине 15-30 см', 'unit': '%', 'scale': 10, 'diff': 0, 'min_val': 0},
+        'SG_cfvo_30-60cm_mean_1000':        {'title': 'SoilGrid: Объёмная доля крупных частиц на глубине 30-60 см', 'unit': '%', 'scale': 10, 'diff': 0, 'min_val': 0},
+        'SG_cfvo_60-100cm_mean_1000':       {'title': 'SoilGrid: Объёмная доля крупных частиц на глубине 60-100 см', 'unit': '%', 'scale': 10, 'diff': 0, 'min_val': 0},
+        'SG_cfvo_100-200cm_mean_1000':      {'title': 'SoilGrid: Объёмная доля крупных частиц на глубине 100-200 см', 'unit': '%', 'scale': 10, 'diff': 0, 'min_val': 0},
         
         'SG_clay_0-5cm_mean_1000':          {'title': 'SoilGrid: Содержание глины в почве на глубине 0-5 см', 'unit': 'г/100 г', 'scale': 10, 'diff': 0, 'min_val': 0, 'step': 1},
         'SG_clay_5-15cm_mean_1000':         {'title': 'SoilGrid: Содержание глины в почве на глубине 5-15 см', 'unit': 'г/100 г', 'scale': 10, 'diff': 0, 'min_val': 0, 'step': 1},

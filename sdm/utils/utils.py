@@ -42,7 +42,6 @@ def apply_decay_to_points(
     elev_data: np.ndarray = None,
     water_data: np.ndarray = None,
     is_bird: bool = False,
-    bias_data: np.ndarray = None,
     dclass: list = None,
     height_barrier: float = 500,
 ):
@@ -65,7 +64,6 @@ def apply_decay_to_points(
         elev_data (np.ndarray, optional): 2D массив с абсолютной высотой (м) для учета климатических пределов.
         water_data (np.ndarray, optional): 2D массив с % открытой воды (0-100) для водных барьеров.
         is_bird (bool): Флаг для птиц (игнорируют водные барьеры).
-        bias_data (np.ndarray, optional): 2D массив со слоем предвзятости наблюдений (human bias).
         dclass (list, optional): Список с названием класса животного (например, ['Amphibia']).
 
     Returns:
@@ -85,7 +83,7 @@ def apply_decay_to_points(
     _, _, pixel_size_m = geod.inv(lon1, lat1, lon2, lat2)
     pixel_size_km = abs(pixel_size_m) / 1000.0
 
-    use_fmm = any(data is not None for data in [slope_data, elev_data, water_data, bias_data])
+    use_fmm = any(data is not None for data in [slope_data, elev_data, water_data])
 
     if use_fmm:
         try:
@@ -97,15 +95,6 @@ def apply_decay_to_points(
             # Базовая скорость перемещения
             speed = np.ones(raster_shape, dtype=np.float32)
             
-            # 0. Штраф за предвзятость наблюдений (Human Bias)
-            if bias_data is not None:
-                # Нормализуем bias_data в диапазон [0, 1] для предсказуемости
-                max_bias = np.nanmax(bias_data)
-                if max_bias > 0:
-                    normalized_bias = np.nan_to_num(bias_data / max_bias)
-                    # Чем выше bias, тем ниже скорость. Используем экспоненциальное затухание.
-                    speed *= np.exp(-normalized_bias * 2.0) # Коэффициент 2.0 можно настраивать
-
             # 1. Штраф за крутые уклоны (Горы обходятся "дорого")
             if slope_data is not None:
                 speed *= np.exp(-np.clip(slope_data, 0, None) / 20.0)
@@ -954,6 +943,7 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
         bias_weights_map (np.ndarray, optional): 2D массив с весами для сэмплирования (слой human bias).
         bias_scale_params (dict, optional): Словарь с 'mean' и 'scale' для обратного масштабирования bias_weights_map.
         bias_sampling_strength (float, optional): Доля (0.0-1.0) случайных точек, которые будут сэмплироваться с учетом bias.
+            Последним значением функция возвращает число точек, реально выбранных с учетом bias.
 
     Returns:
         tuple: Кортеж (rows_bg, cols_bg) - массивы строк и столбцов фоновых точек.
@@ -982,6 +972,8 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
             presence_linear_mask[pres_linear_indices] = True
             # Применяем маску к плоскому представлению random_bg_mask
             random_bg_mask.ravel()[presence_linear_mask] = False
+
+    num_biased = 0
 
     # Выбираем случайные фоновые точки
     candidates_random = np.flatnonzero(random_bg_mask)
@@ -1038,7 +1030,9 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
                             chosen_biased = rng.choice(candidates_random, size=size_to_sample, replace=False, p=probabilities)
                 
                 if len(chosen_biased) < n_biased:
-                    n_uniform += n_biased # Добавляем недостающие точки к равномерной выборке
+                    # В равномерную часть добираем именно недостачу, а не весь n_biased заново,
+                    # иначе при нехватке взвешенных кандидатов итоговый фон окажется больше плана (n_bg_random)
+                    n_uniform += n_biased - len(chosen_biased)
 
             # --- Часть 2: Равномерное случайное сэмплирование ---
             chosen_uniform = np.array([], dtype=np.int64)
@@ -1050,6 +1044,7 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
                     chosen_uniform = rng.choice(remaining_candidates, size=n_uniform, replace=False)
 
             chosen_random = np.concatenate((chosen_biased, chosen_uniform))
+            num_biased = len(chosen_biased)
 
         else:
             # Стандартное равномерное сэмплирование
@@ -1063,7 +1058,7 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
 
     # если не требуется брать точки с границ
     if bg_pc == 100:
-        return rows_random, cols_random, rows_random, cols_random, [], []
+        return rows_random, cols_random, rows_random, cols_random, [], [], num_biased
     
     # --- Часть 2: Фон в "огибающей" (буфере) ---
     # Вычисляем, сколько точек нужно для буферной части
@@ -1073,12 +1068,12 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
     
     if n_bg_buffer_target <= 0:
         # Если уже набрали достаточно случайных точек, возвращаем их
-        return rows_random, cols_random, rows_random, cols_random, [], []
+        return rows_random, cols_random, rows_random, cols_random, [], [], num_biased
     
     # Если точек присутствия нет, буферная часть не может быть сгенерирована
     if not presence_rc_set:
         print("ВНИМАНИЕ: Отсутствуют точки присутствия для генерации фона в огибающей.")
-        return rows_random, cols_random, rows_random, cols_random, [], []
+        return rows_random, cols_random, rows_random, cols_random, [], [], num_biased
     
     # 1. Создаем массив расстояний до ближайшей точки присутствия
     # Инициализируем массив бесконечностью, а точки присутствия - нулем.
@@ -1148,7 +1143,7 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
         all_rows = all_rows[indices]
         all_cols = all_cols[indices]
     
-    return all_rows, all_cols, rows_random, cols_random, rows_buffer, cols_buffer
+    return all_rows, all_cols, rows_random, cols_random, rows_buffer, cols_buffer, num_biased
 
 
 # Подсчёт метрики Бойса (Continuous Boyce Index - CBI)

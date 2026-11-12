@@ -77,7 +77,7 @@ def plot_roc_auc_curve(fpr, tpr, auc, auc_path, id): # постройка кри
         auc_path (str): Путь для сохранения изображения графика.
         id (int): Идентификатор задачи моделирования для заголовка.
     """
-    plt.figure(figsize=(8, 6), facecolor='white')
+    fig = plt.figure(figsize=(8, 6), facecolor='white')
     ax = plt.gca()
     
     # Убираем верхнюю и правую рамки для современного вида
@@ -97,6 +97,7 @@ def plot_roc_auc_curve(fpr, tpr, auc, auc_path, id): # постройка кри
     plt.grid(True, linestyle='--', alpha=0.3)
     
     plt.savefig(auc_path, dpi=200) # quality=90 - не найден такой параметр
+    plt.close(fig) # без этого фигура остаётся открытой до конца жизни процесса (утечка памяти)
 
 
 # Создает видеофайл AVI из массива путей к четырем изображениям.
