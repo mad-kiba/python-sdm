@@ -33,8 +33,14 @@ from .utils.utils import clean_nans_for_json, generate_combined_m_factor_map, sa
 from .utils.utils import apply_decay_to_points, calculate_niche_breadth_pca, handle_model_error
 from .utils.plots import create_beautiful_histogram, draw_map, create_animated_gif, create_avi_from_images
 from .utils.plots import plot_roc_auc_curve, draw_m_factor_map
-from .utils.models import MaxEnt
+from .utils.models import MaxEnt, GLM
 from .utils.predictors_info import get_predictors_info
+
+# Алгоритмы, для которых реализованы прогнозы будущего и прошлого (predict_past отдельно
+# обучает past_model, и ветка создания там сейчас есть только для этих двух). Список белый,
+# а не чёрный ("все, кроме MaxEnt"): новый алгоритм (GLM, GAM, ...) по умолчанию не должен
+# тихо попадать в эти шаги, пока для него явно не добавлена ветка в predict_past.
+TIME_PROJECTION_MODELS = ('RandomForest', 'XGBoost')
 
 class PythonSDM:
     # 0) Загрузка входных параметров
@@ -798,7 +804,11 @@ class PythonSDM:
                 X_train_bg = self.X_train[self.y_train == 0]
                 self.eval_model = MaxEnt(X_pres=X_train_pres, X_bg=X_train_bg)
                 self.eval_model.fit(maxiter=500, tol=1e-5)
-                
+
+            elif (self.IN_MODEL=='GLM'):
+                self.eval_model = GLM(random_state=self.RANDOM_SEED)
+                self.eval_model.fit(self.X_train, self.y_train)
+
             elif (self.IN_MODEL=='RandomForest'):
                 self.eval_model = RandomForestClassifier(
                     n_estimators=500, n_jobs=-1, random_state=self.RANDOM_SEED, 
@@ -831,6 +841,9 @@ class PythonSDM:
             if (self.IN_MODEL=='MaxEnt'):
                 self.model = MaxEnt(X_pres=self.X_pres, X_bg=self.X_bg)
                 self.model.fit(maxiter=500, tol=1e-5)
+            elif (self.IN_MODEL=='GLM'):
+                self.model = GLM(random_state=self.RANDOM_SEED)
+                self.model.fit(self.X, self.y) # Обучаем на X и y!
             elif (self.IN_MODEL=='RandomForest'):
                 self.model = RandomForestClassifier(
                     n_estimators=500, n_jobs=-1, random_state=self.RANDOM_SEED, 
@@ -881,6 +894,16 @@ class PythonSDM:
                 'maxiter': 500,
                 'tol': 1e-5,
                 'n_features_expanded': int(self.model.X_train_ext.shape[1]),
+            }
+        elif self.IN_MODEL == 'GLM':
+            self.MODEL_DATA['model_params'] = {
+                'algorithm': 'GLM',
+                'features': 'linear + quadratic' if self.model.add_quadratic else 'linear',
+                'class_weight': self.model.class_weight,
+                'regularization': 'L2',
+                'C_selected_by_cv': round(self.model.selected_C_, 6),  # подобрано кросс-валидацией, не фиксировано
+                'cv_folds': self.model.cv,
+                'random_seed': self.RANDOM_SEED,
             }
         save_json(self.MODEL_DATA, self.JSON_FILENAME)
 
@@ -1280,7 +1303,7 @@ class PythonSDM:
     # 14) Прогноз распространения вида в будущем
     def predict_future(self): 
         start_time = time.time()
-        if self.MODEL_FUTURE==1 and self.IN_MODEL!='MaxEnt':
+        if self.MODEL_FUTURE==1 and self.IN_MODEL in TIME_PROJECTION_MODELS:
             print(f"\n-- 14. Приступаю к прогнозу будущего ({self.IN_ID})")
             # Пути
             FUTURE_ROOT_DIR = os.path.join(self.OUTPUT_RASTER_DIR, 'dynamic_predictable')   # где лежат папки периодов 2021-2040, ...
@@ -1477,7 +1500,7 @@ class PythonSDM:
     # 15) Прогноз распространения вида в прошлом
     def predict_past(self): 
         start_time = time.time()
-        if self.MODEL_PAST==1 and self.IN_MODEL!='MaxEnt':
+        if self.MODEL_PAST==1 and self.IN_MODEL in TIME_PROJECTION_MODELS:
             print(f"\n-- 15. Приступаю к прогнозу прошлого ({self.IN_ID})")
             
             # Пути
