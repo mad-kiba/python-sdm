@@ -15,13 +15,14 @@ from joblib import Parallel, delayed
 
 from .plots import plot_geotiff_with_osm
 from .utils import clean_nans_for_json
+from .i18n import DEFAULT_LANG, t
 
 
 # Основная функция загрузки, фильтрации и подготовки данных о встречаемости вида.
 def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME, CSV_FILENAME_ADD,
                                 CSV_FILTERED_FILENAME, MONTH_FILENAME,
-                                IN_MIN_LON, IN_MIN_LAT, IN_MAX_LON, IN_MAX_LAT, 
-                                ALLOWED_COORD_UNCERTAIN, MINIMUM_YEAR_ALLOWED):
+                                IN_MIN_LON, IN_MIN_LAT, IN_MAX_LON, IN_MAX_LAT,
+                                ALLOWED_COORD_UNCERTAIN, MINIMUM_YEAR_ALLOWED, lang=DEFAULT_LANG):
     """
     Основная функция загрузки, фильтрации и подготовки данных о встречаемости вида.
     
@@ -61,14 +62,14 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
         else:
             if not IN_CSV:
                 print('file is empty')
-                raise ValueError('Входной файл пустой.')
+                raise ValueError(t('log_err_no_observations_in_data', lang))
             with open(CSV_FILENAME, 'w', encoding='utf-8') as f: # записываем дамп
                 f.write(IN_CSV)
     except Exception as e:
         print('file read/copy error')
-        raise ValueError('Ошибка обработки входного файла: ' + str(e))
+        raise ValueError(t('log_err_input_file_processing', lang, error=str(e)))
         
-    df = detect_and_read_csv(CSV_FILENAME)
+    df = detect_and_read_csv(CSV_FILENAME, lang=lang)
     df = standardize_coord_names(df)
     df['is_additional'] = False # пометка источника: основной массив или дополнительный
 
@@ -77,8 +78,8 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     if 'species' in df.columns:
         if (len(df['species'].unique())==1):
             species = df['species'].unique()[0]
-            print(f"Определён вид: {species}")
-    
+            print(t('log_species_detected', lang, species=species))
+
     kingdom = ['']
     dclass = ['']
     if 'kingdom' in df.columns and 'class' in df.columns:
@@ -86,16 +87,16 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
         temp_df = temp_df.dropna(subset=['kingdom', 'class'])
         kingdom = temp_df['kingdom'].unique()
         dclass =   temp_df['class'].unique()
-        print(f"Вычислено царство {kingdom} и класс {dclass}")
-    
-    print(f"Всего загружено записей: {len(df)}")
-    
+        print(t('log_kingdom_class', lang, kingdom=kingdom, dclass=dclass))
+
+    print(t('log_total_loaded', lang, n=len(df)))
+
     if IN_CSV_ADDITIONAL: # Безопасная проверка на пустую строку и на None
         with open(CSV_FILENAME_ADD, 'w', encoding='utf-8') as f: # Явно указываем UTF-8 для избежания краша на кириллице
             f.write(IN_CSV_ADDITIONAL)
             f.close()
-            
-        df2 = detect_and_read_csv(CSV_FILENAME_ADD)
+
+        df2 = detect_and_read_csv(CSV_FILENAME_ADD, lang=lang)
         df2 = standardize_coord_names(df2)
         df2['is_additional'] = True
 
@@ -104,8 +105,8 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
         common_columns_in_both = list(set(columns_df) & set(columns_df2))
         df2_filtered = df2[common_columns_in_both]
         df = pd.concat([df, df2_filtered], ignore_index=True)
-        
-        print(f"Записей после дозагрузки: {len(df)}, из них дозагружено: {len(df2)}")
+
+        print(t('log_reload_count', lang, n=len(df), n2=len(df2)))
     
     # записываем в файл со статистикой общее число входных наблюдений до фильтрации
     total_obs_in_csv = len(df)
@@ -116,10 +117,10 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     
     if not LAT_COL in df.columns:
         print('csv parse error')
-        raise ValueError('Ошибка обработки csv. Проверьте, что у входных данных корректный формат. Колонки с координатами должны называться lat, lon. Ячейки должны разделяться символом табуляции (при экспорте из Excel используйте формат текстовый файл с табуляцией).')
+        raise ValueError(t('log_err_csv_parse', lang))
     
     # 2.1) Фильтрация мусорных данных из GBIF
-    print(f"-- 2.1. Фильтрация мусорных данных из GBIF ({IN_ID})")
+    print(t('log_filter_gbif_header', lang, id=IN_ID))
     if 'coordinateUncertaintyInMeters' in df.columns:
         # errors='coerce': мусорные/нечисловые значения (например, случайно попавшие сюда
         # таймстампы из-за сдвига колонок в исходном CSV) превращаем в NaN -> 0, а не роняем весь расчёт.
@@ -137,7 +138,7 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     df = df.dropna(subset=[LAT_COL, LON_COL])
     
     after_quality_filter = len(df)
-    print(f"Осталось записей после фильтрации по качеству: {len(df)}")
+    print(t('log_filter_quality', lang, n=len(df)))
 
     # 2.3) фильтрация по координатам
     initial_count_before_bbox = len(df)
@@ -145,12 +146,12 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     df = df[df[LAT_COL]<=IN_MAX_LAT]
     df = df[df[LON_COL]>=IN_MIN_LON]
     df = df[df[LON_COL]<=IN_MAX_LON]
-    print(f"Осталось записей после фильтрации по региону (BBox): {len(df)} (из {initial_count_before_bbox})")
+    print(t('log_filter_bbox', lang, n=len(df), total=initial_count_before_bbox))
     after_bbox_filter = len(df)
 
-    
+
     # 2.3) группировка по месяцам для таблички встреч
-    print(f"-- 2.2. Группировка по месяцам ({IN_ID})")
+    print(t('log_group_by_month_header', lang, id=IN_ID))
     
     MONTH_COL = ''
     counts_dict = {}
@@ -159,7 +160,7 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
         initial_count_before_year = len(df)
         df_coord_filtered = df[year_numeric >= MINIMUM_YEAR_ALLOWED].copy()
         after_year_filter = len(df_coord_filtered)
-        print(f"Осталось записей после фильтрации по году (>= {MINIMUM_YEAR_ALLOWED}): {len(df_coord_filtered)} (из {initial_count_before_year})")
+        print(t('log_filter_year', lang, year=MINIMUM_YEAR_ALLOWED, n=len(df_coord_filtered), total=initial_count_before_year))
 
         
         month_col = ''
@@ -181,10 +182,10 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
         after_year_filter = len(df_coord_filtered)
     
     # 2.4) финальные присустсвия
-    print(f"-- 2.3. Финальные присутствия ({IN_ID})")
-    occ = load_occurrences(df_coord_filtered, LON_COL, LAT_COL, MONTH_COL)
-    print("\n-- Обработка наблюдений")
-    print(f"Осталось записей финально CSV: {len(occ)}")
+    print(t('log_final_presences_header', lang, id=IN_ID))
+    occ = load_occurrences(df_coord_filtered, LON_COL, LAT_COL, MONTH_COL, lang=lang)
+    print(t('log_occurrence_processing_header', lang))
+    print(t('log_final_csv_count', lang, n=len(occ)))
     
     df_coord_filtered.drop(columns=['is_additional']).to_csv(CSV_FILTERED_FILENAME, index=False)
 
@@ -200,11 +201,11 @@ def load_species_occurrence_data(IN_ID, IN_CSV, IN_CSV_ADDITIONAL, CSV_FILENAME,
     }
 
     if total_obs_in_csv == 0:
-        result['error'] = 'Во входных данных нет наблюдений. Проверьте источник.'
+        result['error'] = t('log_err_no_observations_in_input', lang)
         return result
 
     if len(occ) == 0:
-        result['error'] = 'После фильтрации по координатам и дате не осталось ни одного наблюдения, подходящего для моделирования.'
+        result['error'] = t('log_err_no_observations_after_filter', lang)
         return result
     
     return result
@@ -231,7 +232,7 @@ def standardize_coord_names(d):
 
 
 # Загружает DataFrame с наблюдениями, очищает и фильтрует некорректные координаты.
-def load_occurrences(df, lon_col, lat_col, month_col=''): 
+def load_occurrences(df, lon_col, lat_col, month_col='', lang=DEFAULT_LANG):
     """
     Загружает DataFrame с наблюдениями, очищает и фильтрует некорректные координаты.
     
@@ -251,7 +252,7 @@ def load_occurrences(df, lon_col, lat_col, month_col=''):
         ValueError: Если в DataFrame отсутствуют указанные колонки координат.
     """
     if lon_col not in df.columns or lat_col not in df.columns:
-        raise ValueError(f"В CSV нет столбцов {lon_col}/{lat_col}")
+        raise ValueError(t('log_err_missing_coord_columns', lang, lon_col=lon_col, lat_col=lat_col))
     
     df.loc[:, lat_col] = df[lat_col].astype(float)
     df.loc[:, lon_col] = df[lon_col].astype(float)
@@ -267,7 +268,7 @@ def load_occurrences(df, lon_col, lat_col, month_col=''):
 
 
 # Автоматически определяет разделитель CSV файла на основе первой строки и читает файл с помощью pandas.
-def detect_and_read_csv(filename):
+def detect_and_read_csv(filename, lang=DEFAULT_LANG):
     """
     Автоматически определяет разделитель CSV файла на основе первой строки
     и читает файл с помощью pandas.
@@ -301,15 +302,15 @@ def detect_and_read_csv(filename):
     if separator_counts[detected_separator] == 0:
         detected_separator = '\t'
 
-    print(f"Определен разделитель: '{detected_separator}'") # Опционально: для отладки
+    print(t('log_separator_detected', lang, sep=detected_separator)) # Опционально: для отладки
 
     df = pd.read_csv(filename, sep=detected_separator, index_col=False, on_bad_lines='skip', low_memory=False)
     return df
 
 
 # Основная функция загрузки слоёв GeoTIFF с предикторами окружающей среды.
-def load_environmental_predictors(raster_dir, predictors = 'all', period='current', interval='', scales='', 
-                                  bio_info='', base_period='1981-2010'):
+def load_environmental_predictors(raster_dir, predictors = 'all', period='current', interval='', scales='',
+                                  bio_info='', base_period='1981-2010', lang=DEFAULT_LANG):
     """
     Загружает слои GeoTIFF с предикторами окружающей среды и формирует 3D стек (матрицу).
     
@@ -364,9 +365,9 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
     all_available_tifs.extend(static_tifs)
     all_available_tifs.extend(dynamic_tifs)
         
-    print(f"Входной путь для предикторов: {raster_dir}")
-    print(f"Статические предикторы: {static_subdir}")
-    print(f"Динамические предикторы: {dynamic_subdir}")
+    print(t('log_predictors_input_path', lang, path=raster_dir))
+    print(t('log_predictors_static_path', lang, path=static_subdir))
+    print(t('log_predictors_dynamic_path', lang, path=dynamic_subdir))
     
     desired_tifs_ordered = []
     not_found_tifs = []
@@ -424,20 +425,21 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
     
     if len(not_found_tifs)>0:
         print('----------------')
-        print('Доступные предикторы:')
+        print(t('log_available_predictors_label', lang))
         print(all_available_tifs)
-        print('Нужные предикторы:')
+        print(t('log_wanted_predictors_label', lang))
         print(predictors)
-        print('Загруженные предикторы:')
+        print(t('log_loaded_predictors_label', lang))
         print(tifs)
-        print('Не найденные предикторы:')
+        print(t('log_missing_predictors_label', lang))
         print(not_found_tifs)
         print('----------------')
     
     
     if not tifs:
-        raise FileNotFoundError(f"В папке {raster_dir} не найдены файлы, соответствующие предикторам. "
-                                f"Найдены только: {', '.join([os.path.basename(f) for f in all_available_tifs]) if all_available_tifs else 'ни одного'}")
+        found_list = ', '.join([os.path.basename(f) for f in all_available_tifs]) if all_available_tifs else t('log_none_found', lang)
+        raise FileNotFoundError(t('log_err_no_matching_predictor_files', lang, raster_dir=raster_dir) +
+                                t('log_err_found_only', lang, found=found_list))
     
     band_arrays = []
     band_names = []
@@ -460,7 +462,7 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
                 else:
                     mean = 0
                     sc = 1
-                plot_geotiff_with_osm(fp, fpjpg, mean, sc, band, bio_info)
+                plot_geotiff_with_osm(fp, fpjpg, mean, sc, band, bio_info, lang=lang)
     
     for i, fp in enumerate(tifs):
         with rasterio.open(fp) as ds:
@@ -479,9 +481,9 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
             else:
                 # Проверки согласованности
                 if ds.transform != ref_transform or ds.width != ref_width or ds.height != ref_height:
-                    raise ValueError(f"Растр {fp} не согласован по геометрии с первым растром")
+                    raise ValueError(t('log_err_raster_geometry_mismatch', lang, fp=fp))
                 if ds.crs != ref_crs:
-                    raise ValueError(f"Растр {fp} имеет другой CRS: {ds.crs} vs {ref_crs}")
+                    raise ValueError(t('log_err_raster_crs_mismatch', lang, fp=fp, crs=ds.crs, ref_crs=ref_crs))
             band_arrays.append(arr)
             band_names.append(os.path.splitext(os.path.basename(fp))[0])
     
@@ -505,7 +507,7 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
                 filtered_paths.append(band_paths[i])
             
     if not filtered_arrays:
-        raise ValueError("Не осталось предикторов после исключения слоёв ледников.")
+        raise ValueError(t('log_err_no_predictors_after_glacier_exclusion', lang))
         
     stack = np.stack(filtered_arrays, axis=0)  # shape: (bands, H, W)
     band_names = filtered_names
@@ -513,7 +515,7 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
 
     
     # --- Оптимизированная экстраполяция предикторов на водные пространства (Nearest Neighbor) ---
-    print("Экстраполяция значений предикторов на акватории (Nearest Neighbor) в параллельном режиме...")
+    print(t('log_extrapolation_running', lang))
     MAX_EXTRAPOLATE_PIXELS = 50 # Лимит экстраполяции от берега (50 точек растра, т.е. примерно 50 км при step=30")
 
     # Словарь для кэширования результатов distance_transform_edt для уникальных масок
@@ -560,9 +562,9 @@ def load_environmental_predictors(raster_dir, predictors = 'all', period='curren
     if not valid_mask.any():
         nan_layers = [band_names[i] for i in range(stack.shape[0]) if np.isnan(stack[i]).all()]
         if nan_layers:
-            raise ValueError(f"Невозможно продолжить: следующие слои не имеют данных (полностью NaN) в выбранном регионе:\n{', '.join(nan_layers)}")
+            raise ValueError(t('log_err_nan_layers', lang, layers=', '.join(nan_layers)))
         else:
-            raise ValueError("Нет валидных пикселей для моделирования. Области данных на слоях не пересекаются.")
+            raise ValueError(t('log_err_no_valid_pixels', lang))
     # Теперь валидна не вся карта BBox, а только суша + 50 точек прибрежной зоны
 
     # Профиль для сохранения результата

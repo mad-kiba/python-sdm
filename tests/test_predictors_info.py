@@ -45,6 +45,8 @@ def test_last_growing_day_titles_match_threshold():
     ('wc2.1_30s_bio_4', 1099, 5, 20),
     ('ENVIREM_PETseasonality', 5708, 5, 150),
     ('ENVIREM_growingDegDays0', 30910, 0, 7000),
+    # Сарыарка: в SoilGrids cfvo хранится в промилле, поэтому 128 - это 12.8 %
+    ('SG_cfvo_0-5cm_mean_1000', 128, 5, 30),
 ])
 def test_layer_scale_on_real_values(band, raw, low, high):
     # raw кладём в mean: при нулевом стандартизованном значении inverse_scale вернёт (raw - diff) / scale

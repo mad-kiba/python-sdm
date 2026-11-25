@@ -1,12 +1,14 @@
 # sdm/utils/models.py
 # Библиотека PythonSDM для моделирования распространения видов
-# - модель MaxEnt
+# - модель MaxEnt (обёртка над адаптированным ядром elapid, см. sdm/utils/elapid_core/)
 # - модель GLM
 
 import numpy as np
-from scipy.optimize import minimize
 from sklearn.linear_model import LogisticRegressionCV
 from sklearn.preprocessing import StandardScaler
+
+from .elapid_core.models import MaxentModel as _ElapidMaxentModel
+from .i18n import DEFAULT_LANG, t
 
 class GLM:
     """
@@ -35,13 +37,14 @@ class GLM:
         max_iter (int): Максимум итераций L-BFGS на каждую подгонку внутри кросс-валидации.
         random_state (int, optional): Семя генератора случайных чисел (для разбиения фолдов).
     """
-    def __init__(self, add_quadratic=True, Cs=10, cv=5, class_weight='balanced', max_iter=1000, random_state=None):
+    def __init__(self, add_quadratic=True, Cs=10, cv=5, class_weight='balanced', max_iter=1000, random_state=None, lang=DEFAULT_LANG):
         self.add_quadratic = add_quadratic
         self.Cs = Cs
         self.cv = cv
         self.class_weight = class_weight
         self.max_iter = max_iter
         self.random_state = random_state
+        self.lang = lang
 
         self.n_features_orig = None
         self._clf = None
@@ -74,7 +77,7 @@ class GLM:
         self._scaler = StandardScaler()
         X_ext_scaled = self._scaler.fit_transform(X_ext)
 
-        print(f"Обучение GLM (логистическая регрессия, подбор C по {self.cv}-фолдовой кросс-валидации)...")
+        print(t('log_glm_training', self.lang, cv=self.cv))
         self._clf = LogisticRegressionCV(
             Cs=self.Cs, cv=self.cv, solver='lbfgs', max_iter=self.max_iter,
             class_weight=self.class_weight, random_state=self.random_state, n_jobs=-1,
@@ -90,7 +93,7 @@ class GLM:
         # версиях sklearn вообще нет, поэтому не передаём его явно и читаем .C_ в форме, устойчивой
         # к обоим вариантам, а не подгоняем код под одну конкретную версию библиотеки).
         self.selected_C_ = float(np.ravel(self._clf.C_)[0])
-        print(f"Обучение GLM завершено. Выбранная сила регуляризации C = {self.selected_C_:.5g}")
+        print(t('log_glm_training_done', self.lang, c=self.selected_C_))
 
         # Важности: |коэффициент|, агрегированные из расширенных признаков обратно к исходным
         # (тот же приём, что у MaxEnt.feature_importances_, но проще - без попарных произведений)
@@ -106,203 +109,107 @@ class GLM:
     @property
     def feature_importances_(self):
         if self._feature_importances_ is None:
-            raise RuntimeError("Модель не была обучена. Вызовите метод .fit() сначала.")
+            raise RuntimeError(t('log_err_model_not_fitted', self.lang))
         return self._feature_importances_
 
     def predict_proba(self, X):
         if self._clf is None:
-            raise RuntimeError("Модель не была обучена. Вызовите метод .fit() сначала.")
+            raise RuntimeError(t('log_err_model_not_fitted', self.lang))
         X = np.asarray(X)
         if X.ndim == 1:
             X = X.reshape(-1, 1)
         if X.shape[1] != self.n_features_orig:
-            raise ValueError(f"Ожидалось {self.n_features_orig} исходных признаков, получено {X.shape[1]}.")
+            raise ValueError(t('log_err_unexpected_feature_count', self.lang, expected=self.n_features_orig, actual=X.shape[1]))
         return self._clf.predict_proba(self._scaler.transform(self._expand_features(X)))
 
 
 class MaxEnt:
     """
-    Реализация модели максимальной энтропии (MaxEnt), максимально приближенная
-    к классическому алгоритму (генерация сложных признаков, L2-регуляризация
-    и калибровка логистического выхода).
+    Модель MaxEnt - обёртка над адаптированным ядром elapid (sdm/utils/elapid_core/),
+    настоящей реализацией MaxEnt (linear/hinge/threshold/product-признаки, L1-регуляризация,
+    калибровка через alpha/entropy), а не упрощённой логистической регрессией с квадратами,
+    как было раньше.
+
+    Добавляет единственное, чего нет в самом elapid: .feature_importances_, нужный всему
+    остальному пайплайну (sdm.py читает его без защиты от отсутствия для любого алгоритма).
+    Считается через перестановочную важность (permutation importance) - элапид её уже
+    умеет считать в разрезе исходных предикторов, без необходимости разбирать расширенные
+    hinge/threshold-признаки обратно самостоятельно.
 
     Args:
-        X_pres (np.ndarray): Массив предикторов в точках присутствия.
-                             Форма: (n_pres, n_features).
-        X_bg (np.ndarray): Массив предикторов в фоновых точках.
-                           Форма: (n_bg, n_features).
-        add_quadratic (bool): Включает генерацию квадратичных фичей (x^2).
-        add_product (bool): Включает попарные произведения фичей (x_i * x_j).
-        reg_lambda (float): Коэффициент L2-регуляризации для предотвращения переобучения.
+        feature_types (list|str): Типы признаков MaxEnt. По умолчанию - то же, что в elapid:
+            ["linear", "hinge", "product"].
+        beta_multiplier (float): Сила регуляризации (выше - больше коэффициентов отбрасывается).
+        class_weights (str|float): Взвешивание присутствие/фон, см. elapid_core/config.py.
+        random_state (int, optional): Семя генератора случайных чисел.
+        n_importance_repeats (int): Число повторов при расчёте перестановочной важности.
+            Каждый повтор - это n_features дополнительных пересчётов predict_proba по всей
+            обучающей выборке, так что при большом числе предикторов стоит иметь это в виду.
     """
-    def __init__(self, X_pres, X_bg, add_quadratic=True, add_product=False, reg_lambda=0.01):
-        # Принудительно используем float64 для избежания проблем с точностью в scipy.optimize
-        self.X_pres = np.asarray(X_pres, dtype=np.float64)
-        self.X_bg = np.asarray(X_bg, dtype=np.float64)
+    def __init__(self, feature_types=None, beta_multiplier=None, class_weights=None,
+                 random_state=None, n_importance_repeats=10, lang=DEFAULT_LANG, **maxent_kwargs):
+        self.random_state = random_state
+        self.n_importance_repeats = n_importance_repeats
+        self.lang = lang
+        self._maxent_kwargs = dict(maxent_kwargs)
+        if feature_types is not None:
+            self._maxent_kwargs['feature_types'] = feature_types
+        if beta_multiplier is not None:
+            self._maxent_kwargs['beta_multiplier'] = beta_multiplier
+        if class_weights is not None:
+            self._maxent_kwargs['class_weights'] = class_weights
 
-        if self.X_pres.ndim == 1:
-            self.X_pres = self.X_pres.reshape(-1, 1)
-        if self.X_bg.ndim == 1:
-            self.X_bg = self.X_bg.reshape(-1, 1)
-
-        if self.X_pres.shape[1] != self.X_bg.shape[1]:
-            raise ValueError("Количество признаков в X_pres и X_bg должно совпадать.")
-
-        self.n_pres = self.X_pres.shape[0]
-        self.n_bg = self.X_bg.shape[0]
-        self.n_features_orig = self.X_pres.shape[1]
-        
-        self.add_quadratic = add_quadratic
-        self.add_product = add_product
-        self.reg_lambda = reg_lambda
-
-        self.X_train = np.vstack((self.X_pres, self.X_bg))
-        self.y_train = np.array([1] * self.n_pres + [0] * self.n_bg)
-        self.n_samples = self.X_train.shape[0]
-
-        self.weights = None
+        self._model = None
+        self.n_features_orig = None
         self._feature_importances_ = None
-        self.log_Z_ = 0.0
-        self.entropy_ = 0.0
-        self.feature_mapping = []
 
-    def _expand_features(self, X):
-        """Генерация сложных фичей (линейные, квадратичные, произведения)."""
-        features = [X]
-        if self.add_quadratic:
-            features.append(X ** 2)
-            
-        if self.add_product:
-            prods = []
-            for i in range(self.n_features_orig):
-                for j in range(i + 1, self.n_features_orig):
-                    prods.append(X[:, i] * X[:, j])
-            if prods:
-                features.append(np.column_stack(prods))
-                
-        return np.hstack(features)
+    def fit(self, X, y):
+        X = np.asarray(X)
+        if X.ndim == 1:
+            X = X.reshape(-1, 1)
+        self.n_features_orig = X.shape[1]
 
-    def _get_feature_mapping(self):
-        """Связывает индексы расширенных фичей с оригинальными для оценки важности."""
-        mapping = []
-        # Linear
-        for i in range(self.n_features_orig):
-            mapping.append([i])
-        # Quadratic
-        if self.add_quadratic:
-            for i in range(self.n_features_orig):
-                mapping.append([i])
-        # Product
-        if self.add_product:
-            for i in range(self.n_features_orig):
-                for j in range(i + 1, self.n_features_orig):
-                    mapping.append([i, j])
-        return mapping
+        self._model = _ElapidMaxentModel(random_state=self.random_state, **self._maxent_kwargs)
+        print(t('log_maxent_training', self.lang, features=self._model.feature_types, beta=self._model.beta_multiplier))
+        self._model.fit(X, y)
+        print(t('log_maxent_training_done', self.lang))
 
-    def _sigmoid(self, z, max_val=700):
-        """Численно стабильная сигмоида."""
-        z_clipped = np.clip(z, -max_val, max_val)
-        return np.where(z_clipped >= 0, 1 / (1 + np.exp(-z_clipped)), np.exp(z_clipped) / (np.exp(z_clipped) + 1))
+        imp = self._model.permutation_importance_scores(X, y, n_repeats=self.n_importance_repeats).mean(axis=1)
+        # Перестановочная важность - это разница в AUC при порче признака, в теории может
+        # оказаться чуть отрицательной (шум) для совсем неважного предиктора - обнуляем,
+        # отрицательной "важности" в выдаче быть не должно.
+        imp = np.clip(imp, 0, None)
+        sum_imp = np.sum(imp)
+        self._feature_importances_ = (imp / sum_imp) if sum_imp > 0 else imp
 
-    def _objective_function(self, weights):
-        """Целевая функция с расчетом аналитического градиента."""
-        w = weights[:-1]
-        b = weights[-1]
-        
-        z = np.dot(self.X_train_ext, w) + b
-        p = self._sigmoid(z)
-
-        epsilon = 1e-9
-        p_clip = np.clip(p, epsilon, 1. - epsilon)
-
-        # Кросс-энтропия
-        loss = -np.mean(self.y_train * np.log(p_clip) + (1 - self.y_train) * np.log(1 - p_clip))
-        
-        # L2-регуляризация (Ridge)
-        loss += self.reg_lambda * np.sum(w ** 2)
-
-        # Расчет градиента
-        error = p - self.y_train
-        dw = np.dot(self.X_train_ext.T, error) / self.n_samples
-        dw += 2 * self.reg_lambda * w
-        db = np.mean(error)
-
-        return loss, np.append(dw, db)
-
-    def fit(self, optimizer='L-BFGS-B', maxiter=2000, tol=1e-5):
-        print("Расширение признакового пространства (генерация сложных фичей)...")
-        self.X_train_ext = self._expand_features(self.X_train)
-        self.feature_mapping = self._get_feature_mapping()
-        
-        n_weights = self.X_train_ext.shape[1] + 1 # +1 для bias
-        initial_weights = np.zeros(n_weights)
-        
-        print(f"Обучение весов MaxEnt ({n_weights-1} признаков)...")
-        result = minimize(self._objective_function,
-                          initial_weights,
-                          method=optimizer,
-                          jac=True, # Используем аналитический градиент (очень быстро!)
-                          options={'maxiter': maxiter, 'gtol': tol})
-        
-        if not result.success:
-            print(f"Предупреждение: Оптимизация не завершилась успешно: {result.message}")
-
-        self.weights = result.x
-
-        # --- Математика MaxEnt: Расчет Z и Энтропии на фоновых точках ---
-        print("Калибровка распределения MaxEnt (расчет Z и энтропии)...")
-        X_bg_ext = self._expand_features(self.X_bg)
-        z_bg = np.dot(X_bg_ext, self.weights[:-1]) + self.weights[-1]
-        
-        # Нормировочная константа Z (log-sum-exp trick для избежания переполнения)
-        max_z = np.max(z_bg)
-        sum_exp = np.sum(np.exp(z_bg - max_z))
-        self.log_Z_ = max_z + np.log(sum_exp)
-        
-        # Вероятностное распределение на фоне
-        raw_bg = np.exp(z_bg - self.log_Z_)
-        # Энтропия H
-        self.entropy_ = -np.sum(raw_bg * np.log(raw_bg + 1e-15))
-
-        # --- Агрегация важности признаков ---
-        importances = np.zeros(self.n_features_orig)
-        w_abs = np.abs(self.weights[:-1])
-        
-        for i, mapped_indices in enumerate(self.feature_mapping):
-            for idx in mapped_indices:
-                importances[idx] += w_abs[i] / len(mapped_indices)
-        
-        sum_imp = np.sum(importances)
-        self._feature_importances_ = (importances / sum_imp) if sum_imp > 0 else importances
-        
-        print("Обучение завершено.")
+        return self
 
     @property
     def feature_importances_(self):
         if self._feature_importances_ is None:
-            raise RuntimeError("Модель не была обучена. Вызовите метод .fit() сначала.")
+            raise RuntimeError(t('log_err_model_not_fitted', self.lang))
         return self._feature_importances_
 
+    # Делегирующие свойства - чтобы sdm.py мог читать их прямо с self.model (как у GLM),
+    # не обращаясь к "приватному" self.model._model.
+    @property
+    def feature_types(self):
+        return self._model.feature_types if self._model is not None else self._maxent_kwargs.get('feature_types')
+
+    @property
+    def beta_multiplier(self):
+        return self._model.beta_multiplier if self._model is not None else self._maxent_kwargs.get('beta_multiplier')
+
+    @property
+    def class_weights(self):
+        return self._model.class_weights if self._model is not None else self._maxent_kwargs.get('class_weights')
+
     def predict_proba(self, X):
+        if self._model is None:
+            raise RuntimeError(t('log_err_model_not_fitted', self.lang))
         X = np.asarray(X)
         if X.ndim == 1:
             X = X.reshape(-1, 1)
         if X.shape[1] != self.n_features_orig:
-            raise ValueError(f"Ожидалось {self.n_features_orig} исходных признаков, получено {X.shape[1]}.")
-
-        # 1. Расширяем новые данные так же, как при обучении
-        X_ext = self._expand_features(X)
-        
-        # 2. Считаем линейный предиктор
-        z = np.dot(X_ext, self.weights[:-1]) + self.weights[-1]
-        
-        # 3. Вычисляем итоговую вероятность (Logistic Output)
-        # Математическое упрощение: 
-        # P = (e^H * raw) / (1 + e^H * raw), где raw = e^(z - Z)
-        # Эквивалентно P = 1 / (1 + e^-(H + z - Z))
-        # Это позволяет избежать ошибки 'inf / inf = NaN', если z очень большое.
-        
-        eta = self.entropy_ + z - self.log_Z_
-        prob = self._sigmoid(eta)
-
-        return np.column_stack((1 - prob, prob))
+            raise ValueError(t('log_err_unexpected_feature_count', self.lang, expected=self.n_features_orig, actual=X.shape[1]))
+        return self._model.predict_proba(X)

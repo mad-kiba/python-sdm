@@ -7,6 +7,7 @@ project_root = os.path.abspath(os.path.join(current_dir, '..'))
 sys.path.insert(0, project_root)
 
 from sdm import PythonSDM
+from sdm.utils.i18n import t, normalize_lang
 
 
 # устанавливаем параметры для запуска модели
@@ -42,7 +43,8 @@ config = {
         'M_FACTOR_2070': -1,
         'M_FACTOR_2100': -1,
         'SCENARIOS': 'all',
-        'JOBS': {}
+        'JOBS': {},
+        'IN_LANG': 'ru', # язык подписей на картинках: 'ru' (по умолчанию) или 'english'
 }
 
 
@@ -65,6 +67,6 @@ sdm_instance.predict_future()           #14) предсказание будущ
 sdm_instance.predict_monthly()          #16) помесячные предсказания
 sdm_instance.set_done()                 #17) завершение модели
 
-print('Моделирование завершено')
+print(t('log_modeling_done_simple', normalize_lang(config.get('IN_LANG', 'ru'))))
 
 

@@ -18,6 +18,7 @@ import warnings
 
 from .utils import build_histogram_stats, format_float, get_common_range, get_geotiff_square
 from .utils import read_and_to_3857, round_to_significant_figures, wrap_long_lines
+from .i18n import t, DEFAULT_LANG, normalize_lang, localized_predictor_title, localized_predictor_unit
 
 
 # --- Настройка тайлового кеша OSM (contextily) ---
@@ -66,7 +67,7 @@ def add_osm_basemap(ax, crs=None):
 
 
 # Строит и сохраняет график ROC-кривой (Receiver Operating Characteristic).
-def plot_roc_auc_curve(fpr, tpr, auc, auc_path, id): # постройка кривой ROC-AUC
+def plot_roc_auc_curve(fpr, tpr, auc, auc_path, id, lang=DEFAULT_LANG): # постройка кривой ROC-AUC
     """
     Строит и сохраняет график ROC-кривой (Receiver Operating Characteristic).
 
@@ -76,23 +77,24 @@ def plot_roc_auc_curve(fpr, tpr, auc, auc_path, id): # постройка кри
         auc (float): Площадь под кривой (Area Under Curve).
         auc_path (str): Путь для сохранения изображения графика.
         id (int): Идентификатор задачи моделирования для заголовка.
+        lang (str): Язык подписей на графике (см. sdm/utils/i18n.py).
     """
     fig = plt.figure(figsize=(8, 6), facecolor='white')
     ax = plt.gca()
-    
+
     # Убираем верхнюю и правую рамки для современного вида
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
-    
+
     # Отрисовка кривых с современными цветами и заливкой площади
-    plt.plot(fpr, tpr, color='#FF5722', lw=2.5, label=f'ROC-кривая (AUC = {auc:.3f})')
+    plt.plot(fpr, tpr, color='#FF5722', lw=2.5, label=t('roc_legend_curve', lang, auc=auc))
     plt.fill_between(fpr, tpr, alpha=0.15, color='#FF5722')
-    plt.plot([0, 1], [0, 1], color='#90A4AE', lw=2, linestyle='--', label='Случайное угадывание')
+    plt.plot([0, 1], [0, 1], color='#90A4AE', lw=2, linestyle='--', label=t('roc_legend_random', lang))
     plt.xlim([0.0, 1.0])
     plt.ylim([0.0, 1.05])
-    plt.xlabel('False Positive Rate (Ложноположительные)', fontsize=10, color='#37474F')
-    plt.ylabel('True Positive Rate (Истинно положительные)', fontsize=10, color='#37474F')
-    plt.title(f'Качество модели: ROC-кривая (id={id})', fontsize=12, pad=15, color='#263238')
+    plt.xlabel(t('roc_xlabel', lang), fontsize=10, color='#37474F')
+    plt.ylabel(t('roc_ylabel', lang), fontsize=10, color='#37474F')
+    plt.title(t('roc_title', lang, id=id), fontsize=12, pad=15, color='#263238')
     plt.legend(loc="lower right")
     plt.grid(True, linestyle='--', alpha=0.3)
     
@@ -101,7 +103,7 @@ def plot_roc_auc_curve(fpr, tpr, auc, auc_path, id): # постройка кри
 
 
 # Создает видеофайл AVI из массива путей к четырем изображениям.
-def create_avi_from_images(image_paths, output_mp4_path='output.mp4', fps=1): # создание видео AVI из картинок
+def create_avi_from_images(image_paths, output_mp4_path='output.mp4', fps=1, lang=DEFAULT_LANG): # создание видео AVI из картинок
     """
     Создает видеофайл AVI из массива путей к четырем изображениям.
 
@@ -119,12 +121,10 @@ def create_avi_from_images(image_paths, output_mp4_path='output.mp4', fps=1): # 
         # Проверяем существование файла
         #print(img_path)
         if not os.path.exists(img_path):
-            print(f"Файл не найден: {img_path}")
-            raise FileNotFoundError(f"Файл не найден: {img_path}")
+            raise FileNotFoundError(t('log_err_image_not_found', lang, img_path=img_path))
         img = cv2.imread(img_path)
         if img is None:
-            print(f"Не удалось прочитать изображение: {img_path}. Возможно, файл поврежден или имеет неверный формат.")
-            raise IOError(f"Не удалось прочитать изображение: {img_path}. Возможно, файл поврежден или имеет неверный формат.")
+            raise IOError(t('log_err_image_read_failed', lang, img_path=img_path))
         images.append(img)
     
     # 2. Определение размеров видео (все изображения должны иметь одинаковый размер)
@@ -133,9 +133,8 @@ def create_avi_from_images(image_paths, output_mp4_path='output.mp4', fps=1): # 
     for i, img in enumerate(images[1:]):
         h, w, _ = img.shape
         if h != height or w != width:
-            raise ValueError(f"Изображения должны иметь одинаковый размер. "
-                             f"Изображение {image_paths[0]} имеет размер {width}x{height}, "
-                             f"а изображение {image_paths[i+1]} имеет размер {w}x{h}.")
+            raise ValueError(t('log_err_image_size_mismatch', lang, path0=image_paths[0], w0=width, h0=height,
+                                path_i=image_paths[i+1], wi=w, hi=h))
     
     # 3. Определение кодека и создание объекта VideoWriter
     #    CV_FOURCC используется для указания кодека.
@@ -202,7 +201,7 @@ def create_animated_gif(image_paths, output_path="animation.gif", duration=500):
 
 
 # Строит график значений GeoTIFF, накладывая поверх него контекстную карту OSM.
-def plot_geotiff_with_osm(geotiff_path: str, output_path: str, mean: float, scale: float, band: str, bio_info):
+def plot_geotiff_with_osm(geotiff_path: str, output_path: str, mean: float, scale: float, band: str, bio_info, lang=DEFAULT_LANG):
     """
     Строит график значений GeoTIFF, накладывая поверх него контекстную карту OSM.
     График отрисовывается в проекции Web Mercator (EPSG:3857) для корректного
@@ -216,6 +215,7 @@ def plot_geotiff_with_osm(geotiff_path: str, output_path: str, mean: float, scal
         mean (float): Значение среднего для обратного преобразования шкалы.
         scale (float): Значение масштаба (стандартного отклонения) для обратного преобразования шкалы.
                        (Оригинальное значение = масштабированное значение * scale + mean)
+        lang (str): Язык подписей (название/единица предиктора, оси). См. sdm/utils/i18n.py.
     """
 
     print(f"Загрузка GeoTIFF: {geotiff_path}")
@@ -393,10 +393,10 @@ def plot_geotiff_with_osm(geotiff_path: str, output_path: str, mean: float, scal
         ax.set_yticklabels([f'{lat:.2f}°' for lat in lat_labels])
         
         # Заголовки осей
-        ax.set_xlabel('Долгота (°)')
-        ax.set_ylabel('Широта (°)')
-        pred_title = band_info.get('title', band)
-        unit = band_info.get('unit', '')
+        ax.set_xlabel(t('axis_longitude', lang))
+        ax.set_ylabel(t('axis_latitude', lang))
+        pred_title = localized_predictor_title(band_info, band, lang)
+        unit = localized_predictor_unit(band_info, lang)
         if unit and unit != '—':
             pred_title = f"{pred_title}, {unit}"
         ax.set_title(pred_title, fontsize=8)
@@ -408,23 +408,24 @@ def plot_geotiff_with_osm(geotiff_path: str, output_path: str, mean: float, scal
         print(f"График успешно сохранен в {output_path}")
 
 
-# Отрисовывает карту вероятности присутствия вида, накладывая GeoTIFF поверх OpenStreetMap.
-def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title='', lons=[], lats=[], map_only=0, id=0, period_label=''):
+# Отрисовывает карту пригодности условий для вида, накладывая GeoTIFF поверх OpenStreetMap.
+def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title='', lons=[], lats=[], map_only=0, id=0, period_label='', lang=DEFAULT_LANG):
     """
-    Отрисовывает карту вероятности присутствия вида, накладывая GeoTIFF поверх OpenStreetMap.
+    Отрисовывает карту пригодности условий для вида, накладывая GeoTIFF поверх OpenStreetMap.
 
     Динамически подбирает размеры фигуры на основе соотношения сторон (Bounding Box).
-    Отображает точки наблюдений поверх тепловой карты вероятностей.
+    Отображает точки наблюдений поверх тепловой карты пригодности условий.
 
     Args:
-        OUTPUT_SUITABILITY_TIF (str): Путь к исходному GeoTIFF с вероятностями.
+        OUTPUT_SUITABILITY_TIF (str): Путь к исходному GeoTIFF с пригодностью условий.
         OUTPUT_SUITABILITY_JPG (str): Путь для сохранения готового JPG изображения карты.
-        title (str, optional): Заголовок карты. По умолчанию ''.
+        title (str, optional): Заголовок карты (уже переведённый вызывающим кодом). По умолчанию ''.
         lons (list/np.ndarray, optional): Долгота (X-координаты) точек наблюдений (в EPSG:4326). По умолчанию [].
         lats (list/np.ndarray, optional): Широта (Y-координаты) точек наблюдений (в EPSG:4326). По умолчанию [].
         map_only (int, optional): Флаг (1/0) для отрисовки только точек без тепловой карты. По умолчанию 0.
         id (int, optional): Идентификатор модели (используется для генерации ссылок в подвале). По умолчанию 0.
         period_label (str, optional): Крупная надпись периода для отображения в углу. По умолчанию ''.
+        lang (str, optional): Язык подписей (колорбар, дефолтный заголовок, подвал). См. sdm/utils/i18n.py.
     """
 
     data, transform, width, height = read_and_to_3857(OUTPUT_SUITABILITY_TIF)
@@ -509,7 +510,7 @@ def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title='', lons=[], 
     
     # Цветовая шкала
     cbar = fig.colorbar(im, ax=ax, fraction=0.035, pad=0.03)
-    cbar.set_label("Вероятность присутствия")
+    cbar.set_label(t('map_colorbar_suitability', lang))
     
     #print(lons)
     #print(lats)
@@ -557,7 +558,7 @@ def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title='', lons=[], 
     #ax.set_xlabel("Долгота (°)")
     #ax.set_ylabel("Широта (°)")
     if (title==''):
-        ax.set_title("Карта вероятности присутствия вида", pad=8, fontsize=title_fs)
+        ax.set_title(t('map_title_default', lang), pad=8, fontsize=title_fs)
     else:
         ax.set_title(title, pad=8, fontsize=title_fs)
     
@@ -578,8 +579,8 @@ def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title='', lons=[], 
     fig.subplots_adjust(left=0.08, right=0.92, top=0.92, bottom=0.1)
 
     # Добавляем нижний текст с фиксированным расположением
-    text1 = "https://wingeds.world/biodiv - карта биоразнообразия Центральной Азии"
-    text2 = f"https://wingeds.world/sdm/{id} - модель распространения вида (SDM)"
+    text1 = t('map_footer_biodiv', lang)
+    text2 = t('map_footer_sdm', lang, id=id)
     font_size_text = 6
 
     fig.text(0.5, 0.04, text1, ha='center', va='bottom', fontsize=font_size_text, wrap=True)
@@ -598,16 +599,17 @@ def draw_map(OUTPUT_SUITABILITY_TIF, OUTPUT_SUITABILITY_JPG, title='', lons=[], 
 
 
 # Отрисовывает карту распространения M-фактора во времени (4 периода).
-def draw_m_factor_map(OUTPUT_MFACTOR_TIF, OUTPUT_MFACTOR_JPG, title='', lons=[], lats=[], id=0):
+def draw_m_factor_map(OUTPUT_MFACTOR_TIF, OUTPUT_MFACTOR_JPG, title='', lons=[], lats=[], id=0, lang=DEFAULT_LANG):
     """
     Отрисовывает категориальную карту расширения M-фактора для текущего времени, 2040, 2070 и 2100 годов.
 
     Args:
         OUTPUT_MFACTOR_TIF (str): Путь к комбинированному GeoTIFF M-фактора.
         OUTPUT_MFACTOR_JPG (str): Путь для сохранения JPEG.
-        title (str): Заголовок карты.
+        title (str): Заголовок карты (уже переведённый вызывающим кодом).
         lons, lats (list/np.ndarray): Координаты наблюдений вида.
         id (int): Идентификатор задачи.
+        lang (str): Язык подписей (колорбар, дефолтный заголовок, подвал). См. sdm/utils/i18n.py.
     """
     # Используем nearest, чтобы 4 класса не размылись в дробные значения
     data, transform, width, height = read_and_to_3857(OUTPUT_MFACTOR_TIF, resampling_method=Resampling.nearest)
@@ -618,7 +620,7 @@ def draw_m_factor_map(OUTPUT_MFACTOR_TIF, OUTPUT_MFACTOR_JPG, title='', lons=[],
     xmin_v, xmax_v = xmin - pad_m, xmax + pad_m
     ymin_v, ymax_v = ymin - pad_m, ymax + pad_m
     
-    # 4 цвета: от светло-голубого (2100 год) до темно-синего (Текущий ареал)
+    # 4 цвета: от светло-голубого (2100 год) до темно-синего (текущая доступная территория)
     cmap = mcolors.ListedColormap(['#1E88E5', '#42A5F5', '#90CAF9', '#E1F5FE']) 
     cmap.set_bad(alpha=0.0)
     bounds = [0.5, 1.5, 2.5, 3.5, 4.5]
@@ -660,8 +662,12 @@ def draw_m_factor_map(OUTPUT_MFACTOR_TIF, OUTPUT_MFACTOR_JPG, title='', lons=[],
     )
     
     cbar = fig.colorbar(im, ax=ax, fraction=0.035, pad=0.03, ticks=[1, 2, 3, 4])
-    cbar.ax.set_yticklabels(['Текущий', '2040 г.', '2070 г.', '2100 г.'])
-    cbar.set_label("Прогноз расширения доступной зоны")
+    mfactor_year_labels = {
+        'ru': ['Текущий', '2040 г.', '2070 г.', '2100 г.'],
+        'en': ['Current', '2040', '2070', '2100'],
+    }
+    cbar.ax.set_yticklabels(mfactor_year_labels.get(normalize_lang(lang), mfactor_year_labels[DEFAULT_LANG]))
+    cbar.set_label(t('mfactor_colorbar_label', lang))
     
     transformer = Transformer.from_crs(CRS("EPSG:4326"), CRS("EPSG:3857"), always_xy=True)
     x_3857, y_3857 = transformer.transform(lons, lats)
@@ -693,22 +699,22 @@ def draw_m_factor_map(OUTPUT_MFACTOR_TIF, OUTPUT_MFACTOR_JPG, title='', lons=[],
         spine.set_linewidth(0.8)
         spine.set_edgecolor('#666666')
     
-    ax.set_title(title if title else "Зоны доступности вида (M-фактор)", pad=8, fontsize=title_fs)
+    ax.set_title(title if title else t('mfactor_title_default', lang), pad=8, fontsize=title_fs)
     plt.tight_layout()
-    
-    font_size_text = 6 
+
+    font_size_text = 6
     bottom_margin = 0.15
     fig.subplots_adjust(bottom=0.18)
     text_y_offset_relative = ((font_size_text / 72.0) * 1.5) / fig.get_size_inches()[1]
-    
-    fig.text(0.5, bottom_margin - text_y_offset_relative, "https://wingeds.world/biodiv - карта биоразнообразия Центральной Азии", ha='center', va='bottom', fontsize=font_size_text)
-    fig.text(0.5, bottom_margin - text_y_offset_relative * 2, f"https://wingeds.world/sdm/{id} - модель распространения вида (SDM)", ha='center', va='bottom', fontsize=font_size_text)
+
+    fig.text(0.5, bottom_margin - text_y_offset_relative, t('map_footer_biodiv', lang), ha='center', va='bottom', fontsize=font_size_text)
+    fig.text(0.5, bottom_margin - text_y_offset_relative * 2, t('map_footer_sdm', lang, id=id), ha='center', va='bottom', fontsize=font_size_text)
     
     plt.savefig(OUTPUT_MFACTOR_JPG, dpi=dpi, bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
 
 # Рисует гистограмму на заданных осях.
-def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, bins_num: int, data_full: np.ndarray, bio_info, title = '', with_stats_box: bool = False):
+def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, bins_num: int, data_full: np.ndarray, bio_info, title = '', with_stats_box: bool = False, lang=DEFAULT_LANG):
     """
     Строит сравнительную гистограмму распределения значений предиктора.
 
@@ -722,9 +728,12 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
         band_name (str): Название слоя предиктора (используется как ключ для справочника).
         bins_num (int): Количество интервалов (корзин) для построения гистограммы.
         data_full (np.ndarray): Массив значений предиктора на всем фоне (valid_mask).
-        bio_info (dict): Справочник метаданных предикторов (единицы измерения, лимиты).
-        title (str, optional): Дополнительный текст для заголовка графика. По умолчанию ''.
+        bio_info (dict): Справочник метаданных предикторов (единицы измерения, лимиты);
+                          названия и единицы измерения предикторов не переводятся (см. i18n.py).
+        title (str, optional): Дополнительный текст для заголовка графика (уже переведённый
+                                вызывающим кодом, например "Вид: ..."). По умолчанию ''.
         with_stats_box (bool, optional): Наносить ли на график блок со статистиками. По умолчанию False.
+        lang (str, optional): Язык подписей (легенда, оси, заголовок). См. sdm/utils/i18n.py.
 
     Returns:
         dict | None: Статистики слоя в формате histogram_stats (см. build_histogram_stats).
@@ -752,7 +761,7 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
     data_full = data_full[mask_full]
 
     if data.size == 0 and data_full.size == 0:
-        ax.set_title("Нет данных для отображения")
+        ax.set_title(t('hist_no_data', lang))
         return None
 
     # Определяем диапазон бинов один раз ЗДЕСЬ, чтобы не сканировать миллионы точек
@@ -807,7 +816,7 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
     try:
         # Используем bin_edges_full[:-1] как x-координаты (левые границы бинов)
         ax.bar(bin_edges_full[:-1], normalized_counts_full, width=bin_width_full, align='edge',
-               color='#CFD8DC', edgecolor='none', alpha=0.6, label='Фон (весь слой)')
+               color='#CFD8DC', edgecolor='none', alpha=0.6, label=t('hist_legend_background', lang))
         
         # --- Рисуем гистограмму для данных наблюдений (data) с помощью ax.bar ---
         if len(bin_edges_data) > 1:
@@ -817,29 +826,29 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
         
         
         ax.bar(bin_edges_data[:-1], normalized_counts_data, width=bin_width_data, align='edge',
-               color='#03A9F4', edgecolor='white', linewidth=0.5, alpha=0.85, label='Присутствия')
-        
+               color='#03A9F4', edgecolor='white', linewidth=0.5, alpha=0.85, label=t('hist_legend_presence', lang))
+
         # --- Добавляем линии для основных статистик (для data) ---
         # Линии рисуем по исходным данным (data), а не по нормализованным counts.
         # У категориальных слоёв есть только доли, поэтому линий нет.
         if stats_entry and not is_categorical:
             stats_data = stats_entry['obs']
-            ax.axvline(stats_data['mean'], color='#FF5252', linestyle='--', linewidth=1.5, label=f'Среднее ({format_float(stats_data["mean"])})')
-            ax.axvline(stats_data['median'], color='#4CAF50', linestyle='-', linewidth=1.5, label=f'Медиана ({format_float(stats_data["median"])})')
+            ax.axvline(stats_data['mean'], color='#FF5252', linestyle='--', linewidth=1.5, label=t('hist_legend_mean', lang, value=format_float(stats_data["mean"])))
+            ax.axvline(stats_data['median'], color='#4CAF50', linestyle='-', linewidth=1.5, label=t('hist_legend_median', lang, value=format_float(stats_data["median"])))
             ax.axvline(stats_data['p5'], color='#FFB300', linestyle=':', linewidth=1.2)
-            ax.axvline(stats_data['p95'], color='#FFB300', linestyle=':', linewidth=1.2, label='5%/95%')
+            ax.axvline(stats_data['p95'], color='#FFB300', linestyle=':', linewidth=1.2, label=t('hist_legend_percentiles', lang))
 
         # --- Заголовок и подписи осей ---
-        pred_title = band_info.get('title', band_name)
-        unit = band_info.get('unit', '')
+        pred_title = localized_predictor_title(band_info, band_name, lang)
+        unit = localized_predictor_unit(band_info, lang)
         if unit and unit != '—':
             pred_title = f"{pred_title}, {unit}"
-        axtitle = "Гистограмма отклика для предиктора:\n"+wrap_long_lines(pred_title, 100)
+        axtitle = t('hist_title_prefix', lang)+wrap_long_lines(pred_title, 100)
         if (title != ''):
             axtitle = axtitle + "\n" + title
         #ax.set_title(axtitle, fontsize=12, fontweight='bold')
         ax.set_title(axtitle, fontsize=9)
-        ax.set_ylabel('Нормализованная Частота', fontsize=10)
+        ax.set_ylabel(t('hist_ylabel', lang), fontsize=10)
         
         xlabel_text = pred_title
         ax.set_xlabel(xlabel_text, fontsize=7)
@@ -858,7 +867,7 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
         if with_stats_box and stats_entry:
             y_pos_for_stats_data_adjusted = 0.95
             try:
-                add_stats_to_plot(ax, stats_entry, y_pos=y_pos_for_stats_data_adjusted, y_max_overall=total_y_max_normalized)
+                add_stats_to_plot(ax, stats_entry, y_pos=y_pos_for_stats_data_adjusted, y_max_overall=total_y_max_normalized, lang=lang)
             except Exception as e:
                 print("Ошибка нанесения статистических признаков: " + str(e))
 
@@ -877,7 +886,7 @@ def create_beautiful_histogram(ax: plt.Axes, data: np.ndarray, band_name: str, b
 
 
 # Добавляет статистическую информацию на оси гистограммы.
-def add_stats_to_plot(ax: plt.Axes, stats_entry: dict, y_pos: float, y_max_overall: float = None):
+def add_stats_to_plot(ax: plt.Axes, stats_entry: dict, y_pos: float, y_max_overall: float = None, lang=DEFAULT_LANG):
     """
     Добавляет статистическую информацию на оси гистограммы.
     Учитывает y_max_overall для корректного позиционирования текста,
@@ -897,46 +906,24 @@ def add_stats_to_plot(ax: plt.Axes, stats_entry: dict, y_pos: float, y_max_overa
 
     # None - штатное значение: например, D при малом числе точек присутствия
     def fmt(value):
-        return 'н/д' if value is None else format_float(value)
+        return t('stats_na', lang) if value is None else format_float(value)
 
     stats = stats_entry['obs']
     stats_pred = stats_entry['region']
     metrics = stats_entry['metrics']
 
     if stats_entry['kind'] == 'categorical':
-        stats_text = (
-            f"  Доля наблюдений: {fmt(stats['share'])}\n"
-            f"  Доля региона: {fmt(stats_pred['share'])}\n"
-            f"  D Шёнера: {fmt(metrics['schoener_d'])}"
-        )
+        stats_text = t('stats_text_categorical', lang,
+            share=fmt(stats['share']), share_region=fmt(stats_pred['share']), d=fmt(metrics['schoener_d']))
     else:
-        stats_text = (
-            f"  Наблюдения:\n"
-            f"  Мин: {fmt(stats['min'])}\n"
-            f"  P5:  {fmt(stats['p5'])}\n"
-            f"  Медиана: {fmt(stats['median'])}\n"
-            f"  Среднее: {fmt(stats['mean'])}\n"
-            f"  P95: {fmt(stats['p95'])}\n"
-            f"  Макс: {fmt(stats['max'])}\n"
-            f"  Ст. откл.: {fmt(stats['std'])}\n"
-            f"  Асимметрия: {fmt(stats['skewness'])}\n"
-            f"  Эксцесс: {fmt(stats['kurtosis'])}\n\n"
-
-            f"  Весь слой:\n"
-            f"  Мин: {fmt(stats_pred['min'])}\n"
-            f"  P5:  {fmt(stats_pred['p5'])}\n"
-            f"  Медиана: {fmt(stats_pred['median'])}\n"
-            f"  Среднее: {fmt(stats_pred['mean'])}\n"
-            f"  P95: {fmt(stats_pred['p95'])}\n"
-            f"  Макс: {fmt(stats_pred['max'])}\n"
-            f"  Ст. откл.: {fmt(stats_pred['std'])}\n"
-            f"  Асимметрия: {fmt(stats_pred['skewness'])}\n"
-            f"  Эксцесс: {fmt(stats_pred['kurtosis'])}\n\n"
-
-            f"  Сравнение:\n"
-            f"  Отн. ширина (P10-P90): {fmt(metrics['rel_width'])}\n"
-            f"  D Шёнера: {fmt(metrics['schoener_d'])}"
-        )
+        stats_text = t('stats_text_continuous', lang,
+            obs_min=fmt(stats['min']), obs_p5=fmt(stats['p5']), obs_median=fmt(stats['median']),
+            obs_mean=fmt(stats['mean']), obs_p95=fmt(stats['p95']), obs_max=fmt(stats['max']),
+            obs_std=fmt(stats['std']), obs_skew=fmt(stats['skewness']), obs_kurt=fmt(stats['kurtosis']),
+            region_min=fmt(stats_pred['min']), region_p5=fmt(stats_pred['p5']), region_median=fmt(stats_pred['median']),
+            region_mean=fmt(stats_pred['mean']), region_p95=fmt(stats_pred['p95']), region_max=fmt(stats_pred['max']),
+            region_std=fmt(stats_pred['std']), region_skew=fmt(stats_pred['skewness']), region_kurt=fmt(stats_pred['kurtosis']),
+            rel_width=fmt(metrics['rel_width']), d=fmt(metrics['schoener_d']))
 
     # Помещаем текст справа от гистограммы.
     # transform=ax.transAxes означает, что координаты (1.02, y_pos)

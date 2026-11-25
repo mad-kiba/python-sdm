@@ -12,10 +12,11 @@ from rasterio.transform import array_bounds
 from rasterio.crs import CRS
 from rasterio.transform import xy
 
+from .i18n import DEFAULT_LANG, t
 
 
 # Функция для обработки "сырого" GeoTIFF файла для модели.
-def process_single_geotiff(input_filepath: str, output_dir: str, target_crs: str, target_resolution_deg: float, bbox: tuple[float, float, float, float]):
+def process_single_geotiff(input_filepath: str, output_dir: str, target_crs: str, target_resolution_deg: float, bbox: tuple[float, float, float, float], lang=DEFAULT_LANG):
     """
     Проверяет CRS и разрешение GeoTIFF, при необходимости репроектирует и изменяет разрешение,
     затем обрезает по заданному bbox, гарантируя точное совпадение границ и разрешения.
@@ -34,10 +35,10 @@ def process_single_geotiff(input_filepath: str, output_dir: str, target_crs: str
 
     try:
         with rasterio.open(input_filepath) as src:
-            print(f"\nОбработка файла: {os.path.basename(input_filepath)}")
-            print(f"  Исходный CRS: {src.crs}")
-            print(f"  Исходное разрешение: {src.res[0]:.6f} x {src.res[1]:.6f} градусов")
-            print(f"  Исходные границы: {src.bounds}")
+            print(t('log_processing_file', lang, name=os.path.basename(input_filepath)))
+            print(t('log_source_crs', lang, crs=src.crs))
+            print(t('log_source_resolution', lang, x=src.res[0], y=src.res[1]))
+            print(t('log_source_bounds', lang, bounds=src.bounds))
 
             src_crs = src.crs
             
@@ -158,18 +159,18 @@ def process_single_geotiff(input_filepath: str, output_dir: str, target_crs: str
             #    print("  Исходный файл не содержит маски валидности.")
 
             
-            print(f"  Сохранен файл: {final_output_filepath}")
+            print(t('log_file_saved', lang, path=final_output_filepath))
             # Читаем сохраненный файл, чтобы вывести его точные параметры
             with rasterio.open(final_output_filepath) as final_saved_src:
-                print(f"    CRS: {final_saved_src.crs}, Разрешение: {final_saved_src.res[0]:.6f}, Границы: {final_saved_src.bounds}")
+                print(t('log_saved_file_params', lang, crs=final_saved_src.crs, res=final_saved_src.res[0], bounds=final_saved_src.bounds))
 
             return final_output_filepath
 
     except rasterio.errors.RasterioIOError as e:
-        print(f"  Ошибка чтения/записи файла {os.path.basename(input_filepath)}: {e}")
+        print(t('log_rasterio_io_error', lang, name=os.path.basename(input_filepath), e=e))
         return None
     except Exception as e:
-        print(f"  Непредвиденная ошибка при обработке {os.path.basename(input_filepath)}: {e}")
+        print(t('log_unexpected_processing_error', lang, name=os.path.basename(input_filepath), e=e))
         # Обязательно удаляем "битый" недописанный файл, чтобы он не мешал будущим запускам
         if final_output_filepath and os.path.exists(final_output_filepath):
             os.remove(final_output_filepath)
@@ -178,7 +179,7 @@ def process_single_geotiff(input_filepath: str, output_dir: str, target_crs: str
 
 # Проходит по каждому "сырому" слою предикторов и готовит его к модели.
 def clip_rasters(RAW_RASTER_DIR, OUTPUT_RASTER_DIR, IN_MIN_LAT, IN_MIN_LON, IN_MAX_LAT, IN_MAX_LON,
-                 MODEL_FUTURE, MODEL_PAST, MODEL_SEASON, IN_RESOLUTION):
+                 MODEL_FUTURE, MODEL_PAST, MODEL_SEASON, IN_RESOLUTION, lang=DEFAULT_LANG):
     """
     Проходит по директориям с "сырыми" предикторами, обрабатывает их (репроецирует, обрезает)
     и сохраняет готовые GeoTIFF в выходную директорию.
@@ -201,19 +202,18 @@ def clip_rasters(RAW_RASTER_DIR, OUTPUT_RASTER_DIR, IN_MIN_LAT, IN_MIN_LON, IN_M
     if IN_MIN_LAT==0:
         return
     
-    print("\n-- Обработка предикторов")
+    print(t('log_predictors_processing_header', lang))
     #print(RAW_RASTER_DIR)
     #print(OUTPUT_RASTER_DIR)
-    
+
     if IN_RESOLUTION == '30s':
         TARGET_RESOLUTION_DEG = 30 / 3600.0
     elif  IN_RESOLUTION == '1m':
         TARGET_RESOLUTION_DEG = 2 * 30 / 3600.0
     elif IN_RESOLUTION == '5m':
-        TARGET_RESOLUTION_DEG = 10 * 30 / 3600.0    
+        TARGET_RESOLUTION_DEG = 10 * 30 / 3600.0
     else:
-        print(f"Неподдерживаемое разрешение растра: {IN_RESOLUTION}")
-        raise ValueError(f"Неподдерживаемое разрешение растра: {IN_RESOLUTION}")
+        raise ValueError(t('log_unsupported_resolution', lang, res=IN_RESOLUTION))
         
     TARGET_CRS = "EPSG:4326"
     BBOX = (IN_MIN_LON, IN_MIN_LAT, IN_MAX_LON, IN_MAX_LAT)
@@ -262,16 +262,17 @@ def clip_rasters(RAW_RASTER_DIR, OUTPUT_RASTER_DIR, IN_MIN_LAT, IN_MIN_LON, IN_M
                         output_subdir,  # сохраняем в соответствующую подпапку (или корень, если MODEL_FUTURE == 0)
                         TARGET_CRS,
                         TARGET_RESOLUTION_DEG,
-                        BBOX
+                        BBOX,
+                        lang=lang
                     )
-    
+
                     if result_path:
                         processed_files_count += 1
-            
-    
-    print(f"-- Обработка предикторов завершена")
-    print(f"Обработано файлов: {processed_files_count}")
-    print(f"Результаты сохранены в папку: '{OUTPUT_RASTER_DIR}'")
+
+
+    print(t('log_predictors_processing_done', lang))
+    print(t('log_files_processed', lang, n=processed_files_count))
+    print(t('log_results_saved_folder', lang, dir=OUTPUT_RASTER_DIR))
 
 
 # Преобразует координаты (lon, lat) в индексы пикселей (row, col).

@@ -3,7 +3,7 @@ English | [Русский](README.ru.md)
 # Python-SDM
 Species Distribution Modelling (SDM) library for Python.
 
-Python-SDM finds patterns between where a species has been observed and the environmental conditions at those locations, then projects a continuous probability-of-occurrence surface over a region of interest (current, future and past time periods, optionally at monthly resolution).
+Python-SDM finds patterns between where a species has been observed and the environmental conditions at those locations, then projects a continuous surface of relative habitat suitability over a region of interest (current, future and past time periods, optionally at monthly resolution).
 
 A hosted version runs online, with a large, pre-aligned set of environmental predictors already in place, so a model can be fitted for any of several thousand already-supported species without any local setup:
 - Demo: https://wingeds.world/en/sdm (English) / https://wingeds.world/sdm (Russian)
@@ -17,6 +17,7 @@ A general introduction to the SDM method behind this library is available (in Ru
 
 For readers familiar with the SDM/ENM literature, a few implementation choices are worth calling out explicitly:
 
+- **What the system models: ENM vs. SDM.** Python-SDM fits a correlative ecological niche model (ENM) in the sense of Peterson & Soberón (2012): given occurrence points and background, it estimates how similar the conditions in each grid cell are to the conditions at the observation locations. The result is a surface of relative habitat suitability, not a probability of occurrence — its values depend on the number and placement of background points. The surface can be read as a species distribution model (SDM) only after accounting for accessibility (the M component of the BAM diagram, below) and with the caveat that biotic interactions (the B component) are not modelled. The area reported at a given threshold is the area of suitable conditions, not the species' range.
 - **Accessibility (the "M" in the BAM diagram, Soberón & Peterson 2005; Barve et al. 2011).** Rather than a flat Euclidean buffer around known occurrences, the accessible area can be computed as a cost-distance (friction surface) via the Fast Marching Method, with terrain slope, elevation limits and water bodies acting as barriers of configurable strength. Several decay functions from the occurrence buffer to zero are available (buffer, linear, sigmoid, exponential, inverse-quadratic, Gaussian).
 - **Sample selection bias correction.** Background/pseudo-absence points can be drawn with a probability proportional to the pooled, smoothed density of all GBIF occurrence records of the same taxonomic class in the region, following the target-group background idea of Phillips et al. (2009), rather than purely at random.
 - **Evaluation.** Besides ROC AUC, TSS and Cohen's kappa, the continuous Boyce index (Hirzel et al., 2006) is reported, which does not require true absence data.

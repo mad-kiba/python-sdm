@@ -17,6 +17,8 @@ from scipy.spatial import ConvexHull
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
+from .i18n import DEFAULT_LANG, t
+
 
 # Версия расчёта в целом и версия формата histogram_stats
 QB_SDM_VERSION = 'v16'
@@ -44,6 +46,7 @@ def apply_decay_to_points(
     is_bird: bool = False,
     dclass: list = None,
     height_barrier: float = 500,
+    lang: str = DEFAULT_LANG,
 ):
     """
     Создает матрицу пространственного затухания (множителей от 0.0 до 1.0) 
@@ -132,8 +135,8 @@ def apply_decay_to_points(
             min_distances_km = np.abs(tt.data)
             min_distances_km[presence_mask] = 0.0
         except ImportError:
-            print("\nВНИМАНИЕ: Для учета рельефа/барьеров требуется библиотека 'scikit-fmm'. Выполните 'pip install scikit-fmm'.")
-            print("Используется обычное евклидово расстояние.")
+            print(t('log_scikit_fmm_missing', lang))
+            print(t('log_fallback_euclidean', lang))
             min_distances_km = distance_transform_edt(~presence_mask) * pixel_size_km
     else:
         # Обычное евклидово расстояние в километрах
@@ -222,7 +225,7 @@ def predict_suitability_for_stack(model, stack, valid_mask, batch_size=500_000):
         batch_size (int, optional): Количество пикселей за один проход. По умолчанию 500_000.
 
     Returns:
-        np.ndarray: 2D массив вероятностей (H, W), где невалидные пиксели - np.nan.
+        np.ndarray: 2D массив пригодности условий (H, W), где невалидные пиксели - np.nan.
     """
     bands, H, W = stack.shape
     flat = stack.reshape(bands, -1).T  # (H*W, bands)
@@ -715,16 +718,16 @@ def handle_model_error(error_obj, error_filename, model_data, json_filename, con
     return {'status': 'terminated', 'error': str(error_obj), 'code': 401}
 
 
-# Вычисляет физическую площадь (в кв. км) и количество пикселей, превышающих заданные пороги вероятности.
-def get_geotiff_square(filepath: str, threshold) -> dict:
+# Вычисляет физическую площадь (в кв. км) и количество пикселей, превышающих заданные пороги пригодности.
+def get_geotiff_square(filepath: str, threshold, lang=DEFAULT_LANG) -> dict:
     """
-    Вычисляет физическую площадь (в кв. км) и количество пикселей, превышающих заданные пороги вероятности.
+    Вычисляет физическую площадь (в кв. км) и количество пикселей, превышающих заданные пороги пригодности.
 
     Использует эллипсоид WGS84 (pyproj.Geod) для точного расчета площади каждого пикселя
     в зависимости от его широты (компенсация искажений проекции EPSG:4326).
 
     Args:
-        filepath (str): Путь к растровому файлу GeoTIFF с вероятностями.
+        filepath (str): Путь к растровому файлу GeoTIFF с пригодностью условий.
         threshold (list of float): Список пороговых значений (от 0 до 1).
 
     Returns:
@@ -782,7 +785,7 @@ def get_geotiff_square(filepath: str, threshold) -> dict:
                     pixel_area_sq_km = abs(area_sq_meters) / 1_000_000.0
                     pixel_area_by_latitude[center_lat] = pixel_area_sq_km
                 except Exception as e:
-                    print(f"Ошибка при расчете площади пикселя для широты {center_lat}: {e}")
+                    print(t('log_pixel_area_error', lang, lat=center_lat, e=e))
                     # В случае ошибки, можно пропустить эту строку или присвоить какое-то значение по умолчанию
                     continue
 
@@ -926,7 +929,7 @@ def extract_features_from_stack(stack, rows, cols):
 # Сэмплирует n_bg фоновых пикселей, разделяя их на две части
 def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
                       distance_min_pixels = 1, distance_max_pixels = 1, bias_weights_map=None, bias_scale_params=None,
-                      bias_sampling_strength=1.0):
+                      bias_sampling_strength=1.0, lang=DEFAULT_LANG):
     """
     Сэмплирует n_bg фоновых пикселей, разделяя их на две части:
     1. 50% точек - случайно в пределах valid_mask (исключая точки присутствия).
@@ -978,13 +981,13 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
     # Выбираем случайные фоновые точки
     candidates_random = np.flatnonzero(random_bg_mask)
     if candidates_random.size == 0:
-        print("ВНИМАНИЕ: Нет доступных валидных пикселей для генерации случайного фона.")
+        print(t('log_bg_no_valid_pixels', lang))
         rows_random, cols_random = np.array([], dtype=np.int64), np.array([], dtype=np.int64)
     else:
         n_bg_random = min(n_bg_random, candidates_random.size)
 
         if bias_weights_map is not None and bias_sampling_strength > 0 and candidates_random.size > 0:
-            print(f"Применяется гибридное взвешенное сэмплирование (сила = {bias_sampling_strength * 100}%)...")
+            print(t('log_bg_hybrid_sampling', lang, pct=bias_sampling_strength * 100))
             
             n_biased = int(n_bg_random * bias_sampling_strength)
             n_uniform = n_bg_random - n_biased
@@ -996,7 +999,7 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
                 
                 # 1. Обратное масштабирование, если параметры переданы
                 if bias_scale_params and 'mean' in bias_scale_params and 'scale' in bias_scale_params:
-                    print("Выполняется обратное масштабирование весов предвзятости...")
+                    print(t('log_bg_inverse_scaling', lang))
                     mean = bias_scale_params['mean']
                     scale = bias_scale_params['scale']
                     weights = weights * scale + mean
@@ -1024,7 +1027,7 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
                             chosen_biased = rng.choice(candidates_random, size=size_to_sample, replace=False, p=probabilities)
                         # Если size_to_sample == 0, то chosen_biased останется пустым массивом, что корректно.
                     except ValueError as e:
-                        print(f"Предупреждение при взвешенном сэмплировании: {e}. Повторная нормализация.")
+                        print(t('log_bg_weighted_sampling_warning', lang, e=e))
                         probabilities /= np.sum(probabilities)
                         if size_to_sample > 0:
                             chosen_biased = rng.choice(candidates_random, size=size_to_sample, replace=False, p=probabilities)
@@ -1048,13 +1051,13 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
 
         else:
             # Стандартное равномерное сэмплирование
-            print("Применяется стандартное равномерное сэмплирование фона (bias слой не используется или сила=0)...")
+            print(t('log_bg_uniform_sampling', lang))
             chosen_random = rng.choice(candidates_random, size=n_bg_random, replace=False)
 
         rows_random = chosen_random // width
         cols_random = chosen_random % width
 
-    print(f"Сгенерировано фоновых точек: {n_bg_random}")
+    print(t('log_bg_generated_count', lang, n=n_bg_random))
 
     # если не требуется брать точки с границ
     if bg_pc == 100:
@@ -1063,16 +1066,16 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
     # --- Часть 2: Фон в "огибающей" (буфере) ---
     # Вычисляем, сколько точек нужно для буферной части
     n_bg_buffer_target = int(n_bg - len(rows_random)) #* (100-bg_pc) / 100
-    
-    print(f"Нужно сгенерировать точек псевдоприсутствия: {n_bg_buffer_target}")
-    
+
+    print(t('log_bg_pseudo_absence_needed', lang, n=n_bg_buffer_target))
+
     if n_bg_buffer_target <= 0:
         # Если уже набрали достаточно случайных точек, возвращаем их
         return rows_random, cols_random, rows_random, cols_random, [], [], num_biased
-    
+
     # Если точек присутствия нет, буферная часть не может быть сгенерирована
     if not presence_rc_set:
-        print("ВНИМАНИЕ: Отсутствуют точки присутствия для генерации фона в огибающей.")
+        print(t('log_bg_no_presence_for_buffer', lang))
         return rows_random, cols_random, rows_random, cols_random, [], [], num_biased
     
     # 1. Создаем массив расстояний до ближайшей точки присутствия
@@ -1122,7 +1125,7 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
         rows_buffer = chosen_buffer // width
         cols_buffer = chosen_buffer % width
     else:
-        print(f"ВНИМАНИЕ: Нет доступных валидных пикселей в радиусе ({distance_min_pixels} - {distance_max_pixels} пикселей) вокруг точек присутствия для генерации фона.")
+        print(t('log_bg_no_valid_pixels_in_radius', lang, dmin=distance_min_pixels, dmax=distance_max_pixels))
     
     # Объединяем результаты
     all_rows = np.concatenate((rows_random, rows_buffer))
@@ -1135,7 +1138,7 @@ def sample_background(valid_mask, presence_rc_set, n_bg, rng, bg_pc = 100,
     
     
     if remaining_to_sample > 0:
-        print(f"ВНИМАНИЕ: Сгенерировано {current_total} фоновых точек, вместо желаемых {n_bg}.")
+        print(t('log_bg_generated_less_than_requested', lang, current=current_total, n=n_bg))
 
     # Перемешиваем финальный набор точек
     if len(all_rows) > 0:
@@ -1153,10 +1156,10 @@ def continuous_boyce_index(obs, fit, num_bins=100, window_width=0.1):
     Оценивает корреляцию между предсказанной пригодностью и частотой встреч вида.
     
     Args:
-        obs (array-like): Вероятности предсказаний для подтвержденных точек присутствия.
-        fit (array-like): Вероятности предсказаний для всех точек (ожидаемое распределение).
+        obs (array-like): Пригодность (предсказанные значения) для подтвержденных точек присутствия.
+        fit (array-like): Пригодность (предсказанные значения) для всех точек (ожидаемое распределение).
         num_bins (int): Количество шагов смещения скользящего окна.
-        window_width (float): Ширина скользящего окна вероятности (например, 0.1).
+        window_width (float): Ширина скользящего окна пригодности (например, 0.1).
         
     Returns:
         float: Значение индекса Бойса от -1 до 1.
