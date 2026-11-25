@@ -28,7 +28,7 @@ from sklearn.calibration import CalibratedClassifierCV
 from .utils.preprocessing import clip_rasters, points_to_pixel_indices, pixel_indices_to_points
 from .utils.data_loader import load_species_occurrence_data, load_environmental_predictors
 from .utils.utils import sample_background, extract_features_from_stack, inverse_scale, continuous_boyce_index
-from .utils.utils import save_geotiff, predict_suitability_for_stack, save_error, get_geotiff_square
+from .utils.utils import save_geotiff, predict_suitability_for_stack, save_error, get_geotiff_square, calculate_mask_area_km2
 from .utils.utils import clean_nans_for_json, generate_combined_m_factor_map, save_json, QB_SDM_VERSION
 from .utils.utils import apply_decay_to_points, calculate_niche_breadth_pca, handle_model_error
 from .utils.plots import create_beautiful_histogram, draw_map, create_animated_gif, create_avi_from_images
@@ -1229,6 +1229,8 @@ class PythonSDM:
         
         self.MODEL_DATA['current_optimal_area_km2'] = self.gsq[5]
         if month==0:
+            region_total_km2 = calculate_mask_area_km2(self.valid_mask, self.transform, lang=self.IN_LANG)
+            self.MODEL_DATA['area_method'] = 'WGS84 geodesic, per-row'
             self.MODEL_DATA['area_metrics'] = {
                 'square_km': {
                     'threshold_05': self.gsq[0],
@@ -1247,6 +1249,16 @@ class PythonSDM:
                     'threshold_95': self.gsc[4],
                     'threshold_optimal': self.gsc[5],
                     'threshold_suboptimal': self.gsc[6]
+                },
+                'region_total_km2': round(region_total_km2),
+                'percent_of_region': {
+                    'threshold_05': round(self.gsq[0] / region_total_km2 * 100, 2) if region_total_km2 > 0 else 0.0,
+                    'threshold_25': round(self.gsq[1] / region_total_km2 * 100, 2) if region_total_km2 > 0 else 0.0,
+                    'threshold_50': round(self.gsq[2] / region_total_km2 * 100, 2) if region_total_km2 > 0 else 0.0,
+                    'threshold_75': round(self.gsq[3] / region_total_km2 * 100, 2) if region_total_km2 > 0 else 0.0,
+                    'threshold_95': round(self.gsq[4] / region_total_km2 * 100, 2) if region_total_km2 > 0 else 0.0,
+                    'threshold_optimal': round(self.gsq[5] / region_total_km2 * 100, 2) if region_total_km2 > 0 else 0.0,
+                    'threshold_suboptimal': round(self.gsq[6] / region_total_km2 * 100, 2) if region_total_km2 > 0 else 0.0,
                 }
             }
             save_json(self.MODEL_DATA, self.JSON_FILENAME)

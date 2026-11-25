@@ -719,6 +719,28 @@ def handle_model_error(error_obj, error_filename, model_data, json_filename, con
 
 
 # Вычисляет физическую площадь (в кв. км) и количество пикселей, превышающих заданные пороги пригодности.
+def _pixel_area_km2(transform, row_index: int, geod: pyproj.Geod) -> float:
+    """
+    Площадь одного пикселя растра (км²) в заданной строке (широте), по эллипсоиду WGS84.
+
+    Берётся пиксель первого столбца строки row_index: для регулярной сетки EPSG:4326
+    площадь зависит только от широты, не от долготы, так что одного пикселя на строку достаточно.
+    """
+    # Получаем координаты углов пикселя (верхний левый, верхний правый, нижний правый, нижний левый)
+    # transform * (col, row) возвращает (x, y) = (долгота, широта)
+    ul_lon, ul_lat = transform * (0, row_index)         # Верхний левый
+    ur_lon, ur_lat = transform * (1, row_index)         # Верхний правый
+    lr_lon, lr_lat = transform * (1, row_index + 1)     # Нижний правый
+    ll_lon, ll_lat = transform * (0, row_index + 1)     # Нижний левый
+
+    # Используем pyproj.Geod для расчета площади полигона (долготы, широты)
+    area_sq_meters, _ = geod.polygon_area_perimeter(
+        [ul_lon, ur_lon, lr_lon, ll_lon],
+        [ul_lat, ur_lat, lr_lat, ll_lat],
+    )
+    return abs(area_sq_meters) / 1_000_000.0
+
+
 def get_geotiff_square(filepath: str, threshold, lang=DEFAULT_LANG) -> dict:
     """
     Вычисляет физическую площадь (в кв. км) и количество пикселей, превышающих заданные пороги пригодности.
@@ -762,28 +784,8 @@ def get_geotiff_square(filepath: str, threshold, lang=DEFAULT_LANG) -> dict:
 
             # Рассчитываем площадь пикселя для данной широты, если она еще не была рассчитана
             if center_lat not in pixel_area_by_latitude:
-                # Создаем один пиксель в этой строке для расчета площади
-                # Берем первый столбец (j=0) для примера
-                # Создаем координаты углов этого пикселя
                 try:
-                    # Получаем координаты углов пикселя (верхний левый, верхний правый, нижний правый, нижний левый)
-                    # transform.xy(i, j) возвращает (x, y) = (долгота, широта)
-                    ul_lon, ul_lat = transform * (0, i)         # Верхний левый
-                    ur_lon, ur_lat = transform * (1, i)         # Верхний правый
-                    lr_lon, lr_lat = transform * (1, i + 1)     # Нижний правый
-                    ll_lon, ll_lat = transform * (0, i + 1)     # Нижний левый
-
-                    # Создаем полигон из этих координат
-                    # Важно: pyproj.Geod ожидает список долгот и список широт
-                    pixel_polygon_coords = [(ul_lon, ul_lat), (ur_lon, ur_lat), (lr_lon, lr_lat), (ll_lon, ll_lat)]
-
-                    # Используем pyproj.Geod для расчета площади
-                    area_sq_meters, _ = geod.polygon_area_perimeter(
-                        [coord[0] for coord in pixel_polygon_coords],
-                        [coord[1] for coord in pixel_polygon_coords]
-                    )
-                    pixel_area_sq_km = abs(area_sq_meters) / 1_000_000.0
-                    pixel_area_by_latitude[center_lat] = pixel_area_sq_km
+                    pixel_area_by_latitude[center_lat] = _pixel_area_km2(transform, i, geod)
                 except Exception as e:
                     print(t('log_pixel_area_error', lang, lat=center_lat, e=e))
                     # В случае ошибки, можно пропустить эту строку или присвоить какое-то значение по умолчанию
@@ -813,8 +815,46 @@ def get_geotiff_square(filepath: str, threshold, lang=DEFAULT_LANG) -> dict:
     for k in threshold:
         out_square.append(round(out_list[k]))
         out_num.append(round(out_count[k]))
-        
+
     return out_square, out_num
+
+
+def calculate_mask_area_km2(mask: np.ndarray, transform, lang=DEFAULT_LANG) -> float:
+    """
+    Площадь True-ячеек булевой маски (км²), тем же способом, что и get_geotiff_square:
+    эллипсоид WGS84, площадь пикселя считается отдельно для каждой широты (строки).
+
+    Используется для расчета площади всего региона (знаменатель для "% региона"),
+    а не только площади выше порога пригодности.
+
+    Args:
+        mask (np.ndarray): 2D булева маска (например, valid_mask).
+        transform: Афинная трансформация растра (rasterio transform).
+
+    Returns:
+        float: Площадь ячеек со значением True, в км².
+    """
+    geod = pyproj.Geod(ellps='WGS84')
+    height = mask.shape[0]
+    pixel_area_by_latitude = {}
+    total_area_km2 = 0.0
+
+    for i in range(height):
+        row_count = int(mask[i, :].sum())
+        if row_count == 0:
+            continue
+
+        center_lat = transform.f + (i + 0.5) * transform.e
+        if center_lat not in pixel_area_by_latitude:
+            try:
+                pixel_area_by_latitude[center_lat] = _pixel_area_km2(transform, i, geod)
+            except Exception as e:
+                print(t('log_pixel_area_error', lang, lat=center_lat, e=e))
+                continue
+
+        total_area_km2 += row_count * pixel_area_by_latitude[center_lat]
+
+    return total_area_km2
 
 
 # Сохраняет 2D массив numpy в формате GeoTIFF.
