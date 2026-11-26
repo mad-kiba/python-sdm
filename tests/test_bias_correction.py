@@ -14,27 +14,27 @@ def sample(bias=None, strength=0.7, n_bg=200):
 
 
 def test_without_layer_no_points_are_biased():
-    assert sample()[-1] == 0
+    assert sample()[6] == 0
 
 
 def test_zero_strength_means_no_biased_points():
-    assert sample(np.ones(SHAPE, dtype=np.float32), strength=0)[-1] == 0
+    assert sample(np.ones(SHAPE, dtype=np.float32), strength=0)[6] == 0
 
 
 def test_strength_sets_share_of_biased_points():
     result = sample(np.ones(SHAPE, dtype=np.float32), strength=0.7)
-    assert result[-1] == int(len(result[2]) * 0.7)
+    assert result[6] == int(len(result[2]) * 0.7)
 
 
 def test_layer_without_observations_gives_no_biased_points():
     result = sample(np.zeros(SHAPE, dtype=np.float32))
-    assert result[-1] == 0 and len(result[2]) > 0
+    assert result[6] == 0 and len(result[2]) > 0
 
 
 def test_count_is_not_above_number_of_pixels_with_observations():
     bias = np.zeros(SHAPE, dtype=np.float32)
     bias[:2, :5] = 3.0
-    assert sample(bias)[-1] == 10
+    assert sample(bias)[6] == 10
 
 
 def test_biased_points_prefer_observed_pixels():
@@ -50,7 +50,7 @@ def test_total_background_matches_plan_when_biased_part_is_underfilled():
     bias = np.zeros(SHAPE, dtype=np.float32)
     bias[:2, :5] = 3.0  # 10 пикселей с ненулевым весом
     result = sample(bias, strength=0.7, n_bg=200)
-    assert result[-1] == 10
+    assert result[6] == 10
     assert len(result[2]) == 200
 
 

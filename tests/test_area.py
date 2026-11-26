@@ -55,16 +55,15 @@ def test_area_at_60_degrees_matches_independent_geodesic_calculation(tmp_path):
 def test_area_shrinks_with_latitude_roughly_like_cosine(tmp_path):
     """
     Поправка на широту: площадь ячейки на севере меньше, чем на юге.
-    Для полосы 60-61° отношение к экватору близко к cos(60.5°) (широта середины полосы),
-    а не ровно к cos(60°) — поэтому допуск шире, чем для прямых геодезических проверок выше.
+    Как и в ТЗ: отношение площади на 60° к площади на экваторе близко к cos(60°) (допуск 1%).
+    Проверено на реальном pyproj: cos(60°)=0.5, фактическое отношение ≈0.4975 (~0.5% разницы).
     """
     path_eq, _, _ = _make_tif(tmp_path / 'eq.tif', lat0=0.0)
     path_60, _, _ = _make_tif(tmp_path / 'n60.tif', lat0=60.0)
     sq_eq, _ = get_geotiff_square(path_eq, [0.5])
     sq_60, _ = get_geotiff_square(path_60, [0.5])
     ratio = sq_60[0] / sq_eq[0]
-    assert ratio == pytest.approx(math.cos(math.radians(60.5)), rel=0.01)
-    assert ratio == pytest.approx(0.5, abs=0.02)  # качественно: "примерно половина", как в ТЗ
+    assert ratio == pytest.approx(math.cos(math.radians(60.0)), rel=0.01)
 
 
 def test_nodata_cells_excluded_from_area_and_count(tmp_path):
